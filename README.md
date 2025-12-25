@@ -1,8 +1,52 @@
 # PlainMap
 
-PlainMap is a transparent, failure-aware mapping pipeline for ancient and modern DNA, designed to simplify high-throughput read mapping for non-expert users while remaining robust, inspectable, and restartable on HPC systems.
+PlainMap is a transparent, failure-aware mapping pipeline for ancient and modern DNA.
+It is designed to simplify read mapping for non-expert users while remaining robust,
+inspectable, and restartable on HPC systems.
 
-PlainMap deliberately avoids workflow engines and black-box abstractions. Every command executed is visible, logged, and reproducible.
+PlainMap deliberately avoids workflow engines and black-box abstractions.
+Every command executed is visible, logged, and reproducible.
+
+Current version: v0.1 (preliminary)
+
+---
+
+## Design Philosophy
+
+PlainMap prioritises:
+
+- transparency over abstraction
+- robustness over silent failure
+- restartability over monolithic execution
+- simplicity over feature bloat
+
+It is intended as a reference implementation of best-practice read mapping,
+particularly suited to ancient, historical, or otherwise problematic datasets.
+
+---
+
+## Dependencies
+
+PlainMap requires the following tools to be available in your `PATH`:
+
+- `bash` (must be bash, not sh)
+- `gzip`
+- GNU `split` (with `--filter` support; part of coreutils)
+- `fastp`
+- `bwa`
+- `samtools`
+
+Notes:
+
+- GNU `split` is required for deterministic FASTQ chunking.
+  On macOS, install via Homebrew:
+  ```
+  brew install coreutils
+  ```
+
+- No Java, Picard, Docker, Singularity, Snakemake, or Nextflow is required.
+
+---
 
 ## Installation
 
@@ -20,6 +64,8 @@ chmod +x plainmap.sh
 ```
 
 No further installation is required.
+
+---
 
 ## Input Format
 
@@ -41,9 +87,23 @@ Kumamoto_S1_L002_R1_001.fastq.gz
 Kumamoto_S1_L002_R2_001.fastq.gz
 ```
 
-File naming conventions do not matter — read orientation (R1/R2) is detected from FASTQ headers.
+File naming conventions do not matter.
+Read orientation (R1/R2) is detected from FASTQ headers.
+
+---
 
 ## Usage
+
+### Modern DNA (default)
+
+```
+bash plainmap.sh \
+  -manifest manifest.txt \
+  -prefix SAMPLE1 \
+  -ref reference.fa \
+  -outdir results \
+  -t 16
+```
 
 ### Ancient DNA
 
@@ -57,17 +117,7 @@ bash plainmap.sh \
   -t 16
 ```
 
-### Modern DNA
-
-```
-bash plainmap.sh \
-  -manifest manifest.txt \
-  -prefix SAMPLE1 \
-  -ref reference.fa \
-  -outdir results \
-  -library-type modern \
-  -t 24
-```
+---
 
 ## Command-line Parameters
 
@@ -81,12 +131,13 @@ Text file listing input FASTQ.gz files (one per line).
 ```
 -prefix STRING
 ```
-Sample name / prefix used for output files and read groups.
+Sample name used for output files and read groups.
 
 ```
 -ref FILE
 ```
-Reference genome FASTA file. BWA index will be created if missing.
+Reference genome FASTA file.
+A BWA index will be created automatically if missing.
 
 ```
 -outdir DIR
@@ -98,19 +149,18 @@ Output directory.
 ### Library type
 
 ```
--library-type ancient|modern
+-library-type modern|ancient
 ```
-Type of DNA being mapped.
+
+- `modern` (default)  
+  Uses `bwa mem` for paired-end mapping.
 
 - `ancient`  
-  Uses `bwa aln`, merged reads, and single-end duplicate handling.
-
-- `modern`  
-  Uses `bwa mem`, paired-end and single-end mapping.
+  Uses `bwa aln` with merged reads and single-end duplicate handling.
 
 Default:
 ```
-ancient
+modern
 ```
 
 ---
@@ -120,9 +170,9 @@ ancient
 ```
 -t, --threads INT
 ```
-Total number of threads available to the pipeline.
 
-Threads are internally balanced between BWA, samtools view, and samtools sort.
+Total number of threads available to the pipeline.
+Threads are internally balanced between BWA and samtools.
 
 Default:
 ```
@@ -131,7 +181,7 @@ Default:
 
 ---
 
-### Read filtering and mapping parameters
+### Read filtering and mapping
 
 ```
 -minlength INT
@@ -153,6 +203,16 @@ Default:
 0.01
 ```
 
+```
+MAPQ
+```
+Minimum mapping quality applied during BAM filtering.
+
+Value (both modes):
+```
+20
+```
+
 ---
 
 ### Chunking large datasets
@@ -160,11 +220,13 @@ Default:
 ```
 -max-reads-per-chunk INT
 ```
+
 Maximum number of reads per FASTQ chunk.
 
-- Enables deterministic splitting of large FASTQs
+- Enables deterministic splitting of very large FASTQs
 - Prevents memory and wall-time failures
 - Allows partial restart from completed chunks
+- Ensures no read appears in more than one chunk
 
 Set to `0` to disable chunking.
 
@@ -175,21 +237,41 @@ Default:
 
 ---
 
-### Cleanup behaviour
+### Temporary files
 
 ```
--clean normal|aggressive
+--tmpdir DIR
 ```
 
-- `normal`  
-  Removes temporary files but keeps intermediate BAMs.
-
-- `aggressive`  
-  Removes chunk FASTQs, chunk BAMs, and concatenated FASTQs.
+Custom temporary directory (e.g. local scratch).
+A sample-specific subdirectory will be created automatically.
 
 Default:
 ```
-normal
+<outdir>/tmp
+```
+
+---
+
+### Cleanup behaviour
+
+By default, PlainMap removes all intermediate files once the final BAM
+has been successfully created.
+
+```
+--keep-intermediate
+```
+
+Keeps all intermediate files, including:
+
+- concatenated FASTQs
+- chunk FASTQs
+- per-chunk BAMs
+- temporary files
+
+Default:
+```
+disabled
 ```
 
 ---
@@ -199,12 +281,7 @@ normal
 ```
 --resume
 ```
-Resume from completed checkpoints if present.
-
-Default:
-```
-enabled
-```
+Resume from completed checkpoints if present (default).
 
 ```
 --no-resume
@@ -214,7 +291,7 @@ Ignore checkpoints and rerun all steps from scratch.
 ```
 --dry-run
 ```
-Print commands without executing them. Checkpoints are ignored.
+Print commands without executing them.
 
 ```
 --validate
@@ -225,7 +302,7 @@ Validate tools and input FASTQs, then exit without mapping.
 
 ### Tool overrides
 
-PlainMap assumes tools are available in `PATH`, but paths can be overridden:
+Paths to tools can be overridden if they are not in `PATH`:
 
 ```
 --fastp CMD
@@ -234,79 +311,44 @@ PlainMap assumes tools are available in `PATH`, but paths can be overridden:
 ```
 
 Example:
-
 ```
 --bwa /path/to/bwa
 ```
 
 ---
 
-### Help
+## Failure-safe Features
 
-```
--h, --help
-```
-Print usage information and exit.
+PlainMap is explicitly designed to fail early and loudly when something is wrong.
+
+Implemented safeguards include:
+
+### FASTQ integrity checking
+- All input FASTQs are tested with `gzip -t`
+- Corrupt or truncated files cause immediate failure
+
+### Robust fastp error handling
+- fastp stderr is captured and inspected
+- Known failure patterns (e.g. igzip errors, truncated input) cause the pipeline to stop
+- Empty or missing fastp outputs are treated as fatal errors
+
+This prevents silent loss of large fractions of reads.
+
+### Deterministic chunking
+- FASTQs are split by line count (4 lines per read)
+- No random subsampling
+- No read duplication across chunks
+- Safe to restart after partial completion
+
+### Atomic BWA indexing
+- Reference indexing is protected by a filesystem lock
+- Multiple concurrent jobs using the same reference will not corrupt the index
+
+### Restartability
+- Checkpoints are written after major steps
+- Jobs can be safely resumed after wall-time limits or node failure
 
 ---
-
-## Chunking Large Datasets
-
-For very large datasets, PlainMap can split FASTQs into fixed-size chunks by read count:
-
-```
--max-reads-per-chunk 300000000
-```
-
-Chunking is deterministic:
-
-- no random sampling
-- no read duplication across chunks
-- safe restart from partially completed runs
-- global deduplication after merging
-
-## Restarting After Failure
-
-PlainMap automatically creates checkpoint files during execution.
-
-If a job:
-
-- runs out of wall time
-- is cancelled
-- crashes due to node failure
-
-You can simply re-run the same command:
-
-```
-bash plainmap.sh [same arguments]
-```
-
-Completed steps will be skipped automatically.
-
-To force a full re-run:
-
-```
---no-resume
-```
-
-## Validation Mode
-
-To check inputs and dependencies without running mapping:
-
-```
-bash plainmap.sh \
-  -manifest manifest.txt \
-  -prefix SAMPLE1 \
-  -ref reference.fa \
-  -outdir results \
-  --validate
-```
-
-Validation checks:
-
-- tool availability
-- FASTQ presence
-- gzip integrity (detects truncated downloads)
 
 ## Output
 
@@ -325,20 +367,25 @@ Log file:
 SAMPLE_plainmap.log
 ```
 
-Log contents include:
+### Log contents include
 
 - executed commands
-- per-step wall times
+- per-step timestamps
 - total wall time
+- fastp stderr output
 - tool versions
 - SLURM job ID (if available)
+
+---
 
 ## Duplicate Handling
 
 - Duplicates are removed, not just marked
-- Global duplicate removal is performed after merging all chunks
+- Duplicate removal is performed globally after merging all chunks
 - Ancient DNA uses single-end duplicate logic
-- Modern DNA handles paired-end and single-end reads appropriately
+- Modern DNA uses name-sorted duplicate removal
+
+---
 
 ## Read Groups
 
@@ -348,23 +395,10 @@ Read groups are added using:
 samtools addreplacerg
 ```
 
-This avoids Java and Picard dependencies and ensures compatibility with downstream tools such as FreeBayes, bcftools, and GATK.
+This avoids Java/Picard dependencies and ensures compatibility with downstream tools
+such as FreeBayes, bcftools, and GATK.
 
-## Cleanup Options
-
-Default cleanup (`normal`) removes temporary files but keeps intermediate BAMs.
-
-To aggressively reduce disk usage:
-
-```
--clean aggressive
-```
-
-This removes:
-
-- chunk FASTQs
-- chunk BAMs
-- concatenated FASTQs
+---
 
 ## Limitations (v0.1)
 
@@ -379,6 +413,8 @@ Current limitations:
 
 These are design choices, not oversights.
 
+---
+
 ## When to Use PlainMap
 
 PlainMap is ideal if you:
@@ -389,7 +425,10 @@ PlainMap is ideal if you:
 - are teaching or learning mapping workflows
 - want a simple, auditable reference pipeline
 
-If you need a full end-to-end framework (damage profiling, contamination, imputation), consider workflow-based pipelines such as nf-core/eager.
+If you need a full end-to-end framework (damage profiling, contamination estimation,
+variant calling), consider workflow-based pipelines such as nf-core/eager.
+
+---
 
 ## Citation
 
@@ -398,6 +437,8 @@ If you use PlainMap, please cite:
 Author(s). PlainMap: a transparent, failure-aware mapping pipeline for ancient and modern DNA. Journal, Year.
 
 A DOI will be added upon publication.
+
+---
 
 ## Development Status
 
