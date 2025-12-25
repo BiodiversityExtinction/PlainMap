@@ -69,6 +69,187 @@ bash plainmap.sh \
   -t 24
 ```
 
+## Command-line Parameters
+
+### Required parameters
+
+```
+-manifest FILE
+```
+Text file listing input FASTQ.gz files (one per line).
+
+```
+-prefix STRING
+```
+Sample name / prefix used for output files and read groups.
+
+```
+-ref FILE
+```
+Reference genome FASTA file. BWA index will be created if missing.
+
+```
+-outdir DIR
+```
+Output directory.
+
+---
+
+### Library type
+
+```
+-library-type ancient|modern
+```
+Type of DNA being mapped.
+
+- `ancient`  
+  Uses `bwa aln`, merged reads, and single-end duplicate handling.
+
+- `modern`  
+  Uses `bwa mem`, paired-end and single-end mapping.
+
+Default:
+```
+ancient
+```
+
+---
+
+### Threading
+
+```
+-t, --threads INT
+```
+Total number of threads available to the pipeline.
+
+Threads are internally balanced between BWA, samtools view, and samtools sort.
+
+Default:
+```
+1
+```
+
+---
+
+### Read filtering and mapping parameters
+
+```
+-minlength INT
+```
+Minimum read length after adapter trimming.
+
+Default:
+```
+30
+```
+
+```
+-mismatch FLOAT
+```
+Mismatch parameter passed to `bwa aln -n` (ancient DNA only).
+
+Default:
+```
+0.01
+```
+
+---
+
+### Chunking large datasets
+
+```
+-max-reads-per-chunk INT
+```
+Maximum number of reads per FASTQ chunk.
+
+- Enables deterministic splitting of large FASTQs
+- Prevents memory and wall-time failures
+- Allows partial restart from completed chunks
+
+Set to `0` to disable chunking.
+
+Default:
+```
+0
+```
+
+---
+
+### Cleanup behaviour
+
+```
+-clean normal|aggressive
+```
+
+- `normal`  
+  Removes temporary files but keeps intermediate BAMs.
+
+- `aggressive`  
+  Removes chunk FASTQs, chunk BAMs, and concatenated FASTQs.
+
+Default:
+```
+normal
+```
+
+---
+
+### Execution control
+
+```
+--resume
+```
+Resume from completed checkpoints if present.
+
+Default:
+```
+enabled
+```
+
+```
+--no-resume
+```
+Ignore checkpoints and rerun all steps from scratch.
+
+```
+--dry-run
+```
+Print commands without executing them. Checkpoints are ignored.
+
+```
+--validate
+```
+Validate tools and input FASTQs, then exit without mapping.
+
+---
+
+### Tool overrides
+
+PlainMap assumes tools are available in `PATH`, but paths can be overridden:
+
+```
+--fastp CMD
+--bwa CMD
+--samtools CMD
+```
+
+Example:
+
+```
+--bwa /path/to/bwa
+```
+
+---
+
+### Help
+
+```
+-h, --help
+```
+Print usage information and exit.
+
+---
+
 ## Chunking Large Datasets
 
 For very large datasets, PlainMap can split FASTQs into fixed-size chunks by read count:
