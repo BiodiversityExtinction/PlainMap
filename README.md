@@ -25,29 +25,9 @@ particularly suited to ancient, historical, or otherwise problematic datasets.
 
 ---
 
-## Dependencies
-
-PlainMap requires the following tools to be available in your PATH:
-
-- bash (must be bash, not sh)
-- gzip
-- GNU split (with --filter support; part of coreutils)
-- fastp
-- bwa
-- samtools
-
-Notes:
-
-- GNU split is required for deterministic FASTQ chunking.
-  On macOS, install via Homebrew:
-
-    brew install coreutils
-
-- No Java, Picard, Docker, Singularity, Snakemake, or Nextflow is required.
-
----
-
 ## Installation
+
+### Basic installation
 
 Clone the repository:
 
@@ -59,6 +39,80 @@ Make the script executable:
     chmod +x plainmap.sh
 
 No further installation is required.
+
+PlainMap is a single Bash script and does not require compilation, containers,
+or workflow engines.
+
+---
+
+### Tool availability and PATH requirements
+
+By default, PlainMap assumes that required tools are callable directly from the
+command line via the system `PATH`.
+
+Required tools:
+
+- fastp
+- bwa
+- samtools
+- gzip
+- GNU split (with `--filter` support)
+
+If tools are not available in `PATH`, explicit paths may be provided at runtime:
+
+    --fastp /path/to/fastp
+    --bwa /path/to/bwa
+    --samtools /path/to/samtools
+
+These overrides apply only to the current run and do not modify the environment.
+
+---
+
+### Optional: Conda installation of dependencies
+
+PlainMap does not require Conda, but Conda can be used to install all required
+dependencies in a user-controlled environment.
+
+Example Conda installation:
+
+    conda create -n plainmap \
+        fastp \
+        bwa \
+        samtools \
+        coreutils \
+        -c bioconda -c conda-forge
+
+Activate the environment before running PlainMap:
+
+    conda activate plainmap
+
+This approach is recommended for users without system-wide installation privileges,
+for teaching, or for reproducible analyses.
+
+---
+
+### Optional dependency for ancient DNA: mapDamage
+
+For ancient DNA analyses, PlainMap can optionally estimate post-mortem damage
+patterns using mapDamage.
+
+mapDamage is **not required** for modern DNA mapping.
+
+Installation options:
+
+Using Conda (recommended):
+
+    conda install -c bioconda mapdamage
+
+Using pip:
+
+    pip install mapDamage
+
+After installation, the `mapDamage` command must be callable from the command line.
+
+If `-library-type ancient` is specified and mapDamage is not available, PlainMap
+will report a clear error message.
+
 
 ---
 
