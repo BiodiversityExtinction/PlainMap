@@ -62,6 +62,64 @@ No further installation is required.
 
 ---
 
+## Pipeline Overview
+
+PlainMap performs the following steps in order:
+
+1. **Input FASTQ handling**
+   - All FASTQ files listed in the manifest are read.
+   - If multiple FASTQs are provided per sample (e.g. across lanes or libraries), they are concatenated into a single R1 and R2 file.
+   - Read orientation (R1/R2) is detected from FASTQ headers; file naming conventions are ignored.
+
+2. **Adapter and quality trimming**
+   - Reads are processed with `fastp`.
+   - Adapter trimming is always enabled:
+     - By default, adapters are auto-detected by `fastp`.
+     - User-specified adapters can be provided if known.
+   - Poly-G tail trimming (`fastp -g`) is enabled by default to support BGI/DNBseq data.
+   - Reads shorter than the specified minimum length are removed.
+   - Low-quality bases are trimmed according to `fastp` defaults.
+   - Robust error checking ensures that truncated or corrupt FASTQs cause the pipeline to stop.
+
+3. **Reference preparation**
+   - The reference genome is indexed with BWA if required.
+   - Index creation is protected by a filesystem lock to prevent corruption when multiple jobs use the same reference concurrently.
+
+4. **Read mapping**
+   - Trimmed reads are mapped to the reference genome using BWA:
+     - `bwa mem` for modern DNA (paired-end mapping)
+     - `bwa aln` for ancient DNA (merged reads, single-end logic)
+   - Mapping quality filtering is applied.
+   - BAM files are coordinate-sorted.
+
+5. **Chunking and restartability (if enabled)**
+   - For very large datasets, FASTQs can be split deterministically into fixed-size chunks.
+   - Each chunk is processed independently.
+   - Results are merged after mapping.
+   - This enables safe restarts after wall-time limits or job interruption.
+
+6. **Duplicate removal**
+   - Duplicate reads are removed (not just marked) using `samtools markdup`.
+   - Duplicate removal is performed globally after merging all chunks.
+
+7. **Final BAM processing**
+   - The final BAM file is sorted and indexed.
+   - Read groups are added using `samtools addreplacerg`.
+
+8. **Logging and cleanup**
+   - A detailed log file is written, recording:
+     - executed commands
+     - timestamps
+     - tool versions
+     - fastp stderr output
+     - total wall time
+   - By default, all intermediate files are removed to minimise disk usage.
+   - Optional flags allow intermediate files to be retained.
+
+9. **Optional trim-only mode**
+   - When `--trim-only` is specified, the pipeline stops after trimming and validation.
+   - This mode is intended for checking adapter behaviour and read-length distributions before mapping.
+
 ## Input Format
 
 ### Manifest file
@@ -117,7 +175,7 @@ Read orientation (R1/R2) is detected from FASTQ headers.
 
 This runs adapter and poly-G trimming only, performs all validation checks,
 and exits before mapping. It is recommended for new sequencing platforms
-(e.g. BGI/DNBseq) or short-fragment libraries.
+(e.g. BGI/DNBseq).
 
 ---
 
