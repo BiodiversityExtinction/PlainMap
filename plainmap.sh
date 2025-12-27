@@ -22,9 +22,14 @@ MINLEN=30
 MISMATCH=0.01
 LIBTYPE="modern"
 MAX_READS_PER_CHUNK=0
-
 MAPQ=20
 
+# Adapter / trimming controls
+ADAPTER_R1=""
+ADAPTER_R2=""
+TRIM_ONLY=0
+
+# Execution controls
 DRYRUN=0
 RESUME=1
 VALIDATE_ONLY=0
@@ -50,11 +55,18 @@ Required:
   -outdir DIR
 
 Optional:
-  -library-type ancient|modern    (default: modern)
+  -library-type modern|ancient    (default: modern)
   -t, --threads INT               (default: 1)
   -minlength INT                  (default: 30)
   -mismatch FLOAT                 (ancient only; default: 0.01)
   -max-reads-per-chunk INT        (default: 0; disabled)
+
+Adapter trimming:
+  --adapter-r1 SEQ                Explicit adapter for read 1
+  --adapter-r2 SEQ                Explicit adapter for read 2
+  --trim-only                     Run trimming only, then exit
+
+Temporary files:
   --tmpdir DIR                    Custom temporary directory
   --keep-intermediate             Keep all intermediate files
 
@@ -90,6 +102,9 @@ while [[ $# -gt 0 ]]; do
     -minlength) MINLEN="$2"; shift 2 ;;
     -mismatch) MISMATCH="$2"; shift 2 ;;
     -max-reads-per-chunk) MAX_READS_PER_CHUNK="$2"; shift 2 ;;
+    --adapter-r1) ADAPTER_R1="$2"; shift 2 ;;
+    --adapter-r2) ADAPTER_R2="$2"; shift 2 ;;
+    --trim-only) TRIM_ONLY=1; shift ;;
     --tmpdir) TMPDIR_USER="$2"; shift 2 ;;
     --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
     --resume) RESUME=1; shift ;;
@@ -115,11 +130,6 @@ exec > >(tee -a "$LOG") 2>&1
 
 log() { echo "[$(date '+%F %T')] $*"; }
 die() { log "ERROR: $*"; exit 1; }
-
-run() {
-  log "$*"
-  [[ $DRYRUN -eq 0 ]] && eval "$*"
-}
 
 PIPE_T0=$(date +%s)
 
@@ -182,7 +192,19 @@ run_fastp() {
 }
 
 ###############################################################################
-# VALIDATE
+# BUILD FASTP ARGUMENTS
+###############################################################################
+FASTP_ARGS="-l $MINLEN -g"
+
+if [[ -n "$ADAPTER_R1" ]]; then
+  FASTP_ARGS+=" --adapter_sequence $ADAPTER_R1"
+fi
+if [[ -n "$ADAPTER_R2" ]]; then
+  FASTP_ARGS+=" --adapter_sequence_r2 $ADAPTER_R2"
+fi
+
+###############################################################################
+# VALIDATE MODE
 ###############################################################################
 if [[ $VALIDATE_ONLY -eq 1 ]]; then
   log "Validation mode"
@@ -243,7 +265,6 @@ if ! ckpt_ok concat; then
   done < "$MANIFEST"
 
   [[ "${#R1[@]}" -gt 0 ]] || die "No R1 reads found"
-
   cat "${R1[@]}" > "$RAW/${SAMPLE}_R1.fastq.gz"
   [[ "${#R2[@]}" -gt 0 ]] && cat "${R2[@]}" > "$RAW/${SAMPLE}_R2.fastq.gz"
   ckpt_mark concat
@@ -284,7 +305,7 @@ for r1 in "$CHUNKS"/R1_*.fastq.gz; do
 
   if [[ "$LIBTYPE" == "ancient" ]]; then
     merged="$TMP/${SAMPLE}.${id}.merged.fastq"
-    run_fastp "$fastp_err" -g -l "$MINLEN" -i "$r1" -I "$r2" --merged_out "$merged"
+    run_fastp "$fastp_err" $FASTP_ARGS -i "$r1" -I "$r2" --merged_out "$merged"
     [[ -s "$merged" ]] || die "fastp produced empty merged FASTQ"
     $BWA aln -l 999 -n "$MISMATCH" -t "$BWA_THREADS" "$REF" "$merged" |
       $BWA samse "$REF" - "$merged" |
@@ -294,14 +315,24 @@ for r1 in "$CHUNKS"/R1_*.fastq.gz; do
   else
     trim1="$TMP/${SAMPLE}.${id}.R1.fastq"
     trim2="$TMP/${SAMPLE}.${id}.R2.fastq"
-    run_fastp "$fastp_err" -g -l "$MINLEN" -i "$r1" -I "$r2" --out1 "$trim1" --out2 "$trim2"
+    run_fastp "$fastp_err" $FASTP_ARGS -i "$r1" -I "$r2" --out1 "$trim1" --out2 "$trim2"
     [[ -s "$trim1" && -s "$trim2" ]] || die "fastp produced empty trimmed FASTQ"
-    $BWA mem -t "$BWA_THREADS" "$REF" "$trim1" "$trim2" |
-      $SAMTOOLS view -q "$MAPQ" -u |
-      $SAMTOOLS sort -@ "$SORT_THREADS" -o "$bam"
+    if [[ "$TRIM_ONLY" -eq 0 ]]; then
+      $BWA mem -t "$BWA_THREADS" "$REF" "$trim1" "$trim2" |
+        $SAMTOOLS view -q "$MAPQ" -u |
+        $SAMTOOLS sort -@ "$SORT_THREADS" -o "$bam"
+    fi
     rm -f "$trim1" "$trim2"
   fi
 done
+
+###############################################################################
+# TRIM-ONLY MODE EXIT
+###############################################################################
+if [[ "$TRIM_ONLY" -eq 1 ]]; then
+  log "Trim-only mode enabled; exiting before mapping"
+  exit 0
+fi
 
 ###############################################################################
 # MERGE + DEDUP
