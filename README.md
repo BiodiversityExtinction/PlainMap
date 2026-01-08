@@ -155,6 +155,74 @@ File naming conventions do not matter.
 
 ---
 
+## Validation and Dry-Run Modes
+
+PlainMap provides two non-mapping execution modes for safety and inspection.
+These modes serve different purposes and are not interchangeable.
+
+### --dry-run
+
+Dry-run mode prints the planned execution without running the pipeline.
+
+Behaviour:
+- No trimming or mapping is performed
+- No FASTQs are read or tested
+- No output files are created
+- No gzip integrity checks are run
+
+Dry-run prints:
+- resolved absolute paths
+- detected sequencing mode (SE/PE)
+- planned pipeline steps
+
+This mode is intended for:
+- checking command-line arguments
+- verifying path resolution
+- inspecting the execution plan
+- preparing HPC job scripts
+
+Example:
+
+    bash plainmap.sh \
+      -manifest manifest.txt \
+      -prefix SAMPLE1 \
+      -ref reference.fa \
+      -outdir results \
+      --dry-run
+
+---
+
+### --validate
+
+Validation mode actively checks inputs and tools, but does not perform trimming
+or mapping.
+
+Behaviour:
+- No trimming or mapping is performed
+- All required tools are checked for availability
+- Every FASTQ listed in the manifest is tested with gzip -t
+- Corrupt or truncated FASTQs cause immediate failure
+- No mapping outputs are created
+
+This mode is intended for:
+- preflight validation before long runs
+- detecting corrupted or incomplete FASTQs
+- checking shared filesystems and staging areas
+- automated checks in CI or HPC environments
+
+Example:
+
+    bash plainmap.sh \
+      -manifest manifest.txt \
+      -prefix SAMPLE1 \
+      -ref reference.fa \
+      -outdir results \
+      --validate
+
+In short:
+- --dry-run answers “what would happen?”
+- --validate answers “is my data and environment safe to run?”
+
 ## Usage
 
 Modern DNA:
@@ -184,24 +252,6 @@ Trim-only mode:
       -ref reference.fa \
       -outdir results \
       --trim-only
-
-Validation-only mode:
-
-    bash plainmap.sh \
-      -manifest manifest.txt \
-      -prefix SAMPLE1 \
-      -ref reference.fa \
-      -outdir results \
-      --validate
-
-Optional slow depth statistics:
-
-    bash plainmap.sh \
-      -manifest manifest.txt \
-      -prefix SAMPLE1 \
-      -ref reference.fa \
-      -outdir results \
-      --depth-stats
 
 ---
 
