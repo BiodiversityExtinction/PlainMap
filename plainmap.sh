@@ -35,7 +35,6 @@ VALIDATE_ONLY=0
 RESUME=1
 KEEP_INTERMEDIATE=0
 
-DO_DEPTH=0                  # slow: samtools depth mean depth + total bp
 TMPDIR_USER=""
 
 RESET=0
@@ -69,7 +68,6 @@ Optional:
   --adapter-r1 SEQ
   --adapter-r2 SEQ
   --trim-only                     Trim only (fastp); exit before mapping
-  --depth-stats                   Also compute mean depth + total bp (slow)
   --tmpdir DIR                    Custom temp dir (e.g. node-local scratch)
   --keep-intermediate             Keep <outdir>/<prefix>/work
   --resume | --no-resume
@@ -110,7 +108,6 @@ while [[ $# -gt 0 ]]; do
     --adapter-r1) ADAPTER_R1="$2"; shift 2 ;;
     --adapter-r2) ADAPTER_R2="$2"; shift 2 ;;
     --trim-only) TRIM_ONLY=1; shift ;;
-    --depth-stats) DO_DEPTH=1; shift ;;
     --tmpdir) TMPDIR_USER="$2"; shift 2 ;;
     --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
     --resume) RESUME=1; shift ;;
@@ -183,7 +180,6 @@ REPORTS="$OUT/${SAMPLE}/fastp_reports"
 
 STATS="$OUT/${SAMPLE}.plainmap.stats.tsv"
 COV_TSV="$OUT/${SAMPLE}.plainmap.coverage.tsv"
-DEPTH_TSV="$OUT/${SAMPLE}.plainmap.depth.tsv"
 
 if [[ -n "$TMPDIR_USER" ]]; then
   TMP="$TMPDIR_USER/plainmap_${SAMPLE}"
@@ -710,11 +706,6 @@ AVG_COV=$(
        END{if(len>0) printf "%.6f", sum/len; else print 0}' \
     "$COV_TSV"
 )
-
-if [[ $DO_DEPTH -eq 1 ]]; then
-  log "STEP: depth statistics (slow)"
-  "$SAMTOOLS" depth -a "$OUT_BAM" | awk '{sum+=$3;cnt++} END{ if(cnt==0){print "mean_depth\t0\ntotal_bp\t0"} else {print "mean_depth\t"sum/cnt"\ntotal_bp\t"sum} }' > "$DEPTH_TSV"
-fi
 
 log "STEP: summary statistics"
 MAPPED_ALL=$("$SAMTOOLS" view -c -F 4 "$MERGED_BAM")
