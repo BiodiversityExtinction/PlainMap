@@ -38,7 +38,6 @@ KEEP_INTERMEDIATE=0
 TMPDIR_USER=""
 
 RESET=0
-RESET_STEP=""
 
 FASTP=${FASTP:-fastp}
 BWA=${BWA:-bwa}
@@ -74,7 +73,6 @@ Optional:
   --dry-run                       Print plan only (no gzip -t, no work)
   --validate                      Check tools + gzip -t all manifest FASTQs, then exit
   --reset                         Clear ALL checkpoints for this sample
-  --reset-step STEP               Clear checkpoint for a single step
 
 Tool overrides:
   --fastp CMD
@@ -115,7 +113,6 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRYRUN=1; shift ;;
     --validate) VALIDATE_ONLY=1; shift ;;
     --reset) RESET=1; shift ;;
-    --reset-step) RESET_STEP="$2"; shift 2 ;;
     --fastp) FASTP="$2"; shift 2 ;;
     --bwa) BWA="$2"; shift 2 ;;
     --samtools) SAMTOOLS="$2"; shift 2 ;;
@@ -217,10 +214,6 @@ ckpt_ok() { local step="$1"; shift; [[ $RESUME -eq 1 ]] && [[ -f "$(ckpt_file "$
 if [[ $RESET -eq 1 ]]; then
   log "Reset requested: clearing all checkpoints for sample $SAMPLE"
   rm -f "$CKPT/${SAMPLE}."*.done 2>/dev/null || true
-fi
-if [[ -n "$RESET_STEP" ]]; then
-  log "Reset-step requested: clearing checkpoint for step '$RESET_STEP'"
-  rm -f "$(ckpt_file "$RESET_STEP")" 2>/dev/null || true
 fi
 
 ###############################################################################
