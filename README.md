@@ -74,7 +74,6 @@ For ancient DNA:
 
 Example:
 
-    # Sample Kumamoto
     Kumamoto_S1_L001_R1_001.fastq.gz
     Kumamoto_S1_L001_R2_001.fastq.gz
     Kumamoto_S1_L002_R1_001.fastq.gz
