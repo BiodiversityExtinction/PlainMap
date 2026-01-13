@@ -1,6 +1,6 @@
 # PlainMap
 
-PlainMap is a mapping pipeline for ancient and modern DNA designed to “just run” on HPC systems with minimal fuss.
+PlainMap is a mapping pipeline for ancient and modern DNA designed to **just run** on HPC systems with minimal fuss.
 
 Current version: **v0.1 (preliminary, under active development)**
 
@@ -102,7 +102,8 @@ PlainMap performs the following steps:
    - Classifies reads as R1/R2 using FASTQ header inspection (Illumina + ENA styles)
    - Groups files into “units”:
      - SE unit = one R1 FASTQ
-     - PE unit = matching R1/R2 FASTQs (lane-splits must have matching counts)
+     - PE unit = matching R1/R2 FASTQs  
+       (lane-splits must be provided as matching R1/R2 lists; PlainMap refuses unsynchronized PE)
 
 2. **Adaptive pre-fastp chunking (safety valve)**
    - Controlled by `-max-reads-per-chunk INT`
@@ -111,54 +112,63 @@ PlainMap performs the following steps:
      - If unit read count ≤ INT: do not chunk (processed as a single chunk)
    - If `-max-reads-per-chunk 0`, this is disabled
 
-3. **Adapter/quality trimming (fastp, JSON only)**
-   - fastp runs on each unit (or on each unit-chunk if pre-fastp chunking triggered)
+3. **Optional pre-fastp pilot limiting**
+   - Controlled by `--pilot-fragments INT`
+   - If set (>0), PlainMap limits the number of raw fragments processed **before fastp**
+   - Applied **per raw chunk**:
+     - SE: first `INT` reads
+     - PE: first `INT` pairs (R1 and R2 limited symmetrically)
+   - This is intended for fast “pilot” comparisons without trimming/mapping the full dataset
+
+4. **Adapter/quality trimming (fastp, JSON only)**
+   - fastp runs per unit (or per unit-chunk if pre-fastp chunking is active)
    - Minimum read length enforced (`-minlength`)
    - Poly-G trimming enabled
    - fastp HTML output is **not generated** (JSON only)
    - For PE:
      - adapter detection is enabled automatically unless adapters are explicitly provided
 
-4. **Pooling after trimming**
+5. **Pooling after trimming**
    - Trimmed outputs are appended into pooled trimmed FASTQs (concatenated gzip members)
    - This avoids mixing adapters *before trimming*, while still enabling fast mapping (map once)
 
-5. **Reference preparation**
+6. **Reference preparation**
    - BWA index created if missing
    - Index creation protected by a filesystem lock
 
-6. **Read mapping (pooled; map once)**
-   - **modern**:
+7. **Read mapping (pooled; map once)**
+   - **modern**
      - PE: `bwa mem` on pooled trimmed R1/R2
      - SE: `bwa mem` on pooled SE reads + pooled PE rescue reads (merged/unpaired)
-   - **ancient**:
-     - SE: `bwa aln` + `bwa samse`
-     - PE: fastp merges reads first; pooled merged reads map as SE via `bwa aln` + `bwa samse`
-   - MAPQ filter applied during BAM conversion (`-q`, default 20)
+   - **ancient**
+     - fastp merges reads first; pooled merged reads map as SE via `bwa aln` + `bwa samse`
+     - pooled SE reads map as SE via `bwa aln` + `bwa samse`
+   - MAPQ filter applied during BAM conversion (default MAPQ 20)
 
-7. **Merge and duplicate removal**
+8. **Merge and duplicate removal**
    - All pooled mapping outputs merged
    - Duplicate removal using `samtools markdup -r`
    - For modern runs that include PE data, fixmate workflow is used before markdup
 
-8. **Final BAM processing**
+9. **Final BAM processing**
    - Coordinate sort and index
    - Read groups added using `samtools addreplacerg`
 
-9. **Optional mapDamage**
-   - Runs if `-library-type ancient`
+10. **Optional mapDamage**
+    - Runs if `-library-type ancient`
 
-10. **Coverage/depth + summary statistics**
-   - Per-contig coverage and mean depth via `samtools coverage`
-   - Genome-wide:
-     - `avg_depth` = length-weighted mean of per-contig mean depth
-     - `pct_covered` = length-weighted percent of bases covered (>=1x)
-   - Fragment-aware mapping counts:
-     - `mapped_fragments_*` counts templates/fragments (PE counted via mapped read1; SE counted via non-paired reads)
+11. **Coverage/depth + summary statistics**
+    - Per-contig coverage and mean depth via `samtools coverage`
+    - Genome-wide:
+      - `avg_depth` = length-weighted mean of per-contig mean depth
+      - `pct_covered` = length-weighted percent of bases covered (>=1x)
+    - Fragment-aware mapping counts:
+      - `mapped_fragments_*` counts templates/fragments  
+        (PE counted via mapped read1; SE counted via non-paired reads)
 
-11. **Cleanup**
-   - Intermediate files removed by default
-   - `--keep-intermediate` retains the entire work directory
+12. **Cleanup**
+    - Intermediate files removed by default
+    - `--keep-intermediate` retains the entire work directory
 
 ---
 
@@ -246,6 +256,16 @@ Enable pre-fastp chunking safety valve (recommended for extremely large single i
       -t 16 \
       -max-reads-per-chunk 50000000
 
+Pilot run (limit processing before fastp; useful for comparing ancient vs modern settings quickly):
+
+    bash plainmap.sh \
+      -manifest manifest.txt \
+      -prefix SAMPLE1 \
+      -ref reference.fa \
+      -outdir results \
+      -t 16 \
+      --pilot-fragments 10000000
+
 ---
 
 ## Output
@@ -269,7 +289,8 @@ Optional:
 The stats file includes:
 
 - `raw_R1_reads`, `raw_R2_reads`
-- `raw_fragments` (fragment/template count; defined as total raw R1 reads across all units)
+- `raw_fragments`  
+  (fragment/template count; defined as total raw R1 reads processed across all units/chunks; pilot-aware)
 - `trimmed_fragments`
 - `merged_reads`, `unpaired_reads`
 - `mapped_reads_all`, `mapped_reads_unique`
