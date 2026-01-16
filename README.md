@@ -286,20 +286,132 @@ Optional:
 
 ## Summary Statistics (TSV)
 
-The stats file includes:
+PlainMap produces a single tab-separated summary file per sample.  
+Each row corresponds to one PlainMap run (including pilot runs).
 
-- `raw_R1_reads`, `raw_R2_reads`
-- `raw_fragments`  
-  (fragment/template count; defined as total raw R1 reads processed across all units/chunks; pilot-aware)
-- `trimmed_fragments`
-- `merged_reads`, `unpaired_reads`
-- `mapped_reads_all`, `mapped_reads_unique`
-- `mapped_fragments_all`, `mapped_fragments_unique` (**fragment-aware**)
-- `endog` (mapped_fragments_unique / raw_fragments)
-- `duprate` (fragment-space duplication rate)
-- `avg_readlen`, `mapped_bp`
-- `avg_depth` (genome-wide length-weighted mean depth)
-- `pct_covered` (genome-wide percent bases covered >=1x)
+All statistics are **fragment-aware**, meaning paired-end reads are counted as a single sequencing fragment (template) where appropriate. When pilot mode is enabled, all values refer only to the subsampled input.
+
+---
+
+### Column definitions
+
+- **sample**  
+  Sample prefix provided with `-prefix`.
+
+- **library_type**  
+  Mapping mode used:
+  - `modern`: `bwa mem`
+  - `ancient`: `bwa aln` + `samse`
+
+- **seq_mode**  
+  Sequencing mode detected from the manifest:
+  - `SE` (single-end only)
+  - `PE` (paired-end present; may include mixed SE + PE inputs)
+
+- **pilot_fragments**  
+  Number of raw fragments processed per chunk in pilot mode.  
+  A value of `0` indicates pilot mode is disabled.
+
+- **max_reads_per_chunk**  
+  Maximum reads per chunk used for adaptive pre-fastp chunking.  
+  A value of `0` indicates chunking is disabled.
+
+---
+
+### Raw input statistics
+
+- **raw_R1_reads**  
+  Total number of raw R1 reads processed (pilot-aware).
+
+- **raw_R2_reads**  
+  Total number of raw R2 reads processed (pilot-aware).  
+  This value is `0` for purely single-end datasets.
+
+- **raw_fragments**  
+  Total number of raw sequencing fragments (templates), defined as:
+  - paired-end data: number of R1 reads
+  - single-end data: number of reads
+
+  This value is the denominator for fragment-level statistics and endogenous fraction.
+
+---
+
+### Trimming and merging statistics
+
+- **trimmed_fragments**  
+  Number of fragments remaining after fastp filtering and minimum length enforcement.
+
+- **merged_reads**  
+  Number of paired-end read pairs successfully merged by fastp.  
+  Merged reads are treated as single-end fragments for mapping.
+
+- **unpaired_reads**  
+  Number of reads rescued as single-end after paired-end processing  
+  (e.g. orphaned reads or failed merges).
+
+- **pct_fragments_remaining**  
+  Percentage of raw fragments retained after trimming, calculated as:  
+  `trimmed_fragments / raw_fragments × 100`.
+
+- **trimmed_over_raw**  
+  Ratio of trimmed fragments to raw fragments.
+
+---
+
+### Mapping statistics (read-level)
+
+- **mapped_reads_all**  
+  Total number of mapped reads before duplicate removal.
+
+- **mapped_reads_unique**  
+  Number of mapped reads remaining after duplicate removal.
+
+---
+
+### Mapping statistics (fragment-level)
+
+- **mapped_fragments_all**  
+  Number of mapped fragments before duplicate removal, defined as:
+  - paired-end data: mapped read1 counts as one fragment
+  - single-end data: each mapped read counts as one fragment
+
+- **mapped_fragments_unique**  
+  Number of unique mapped fragments after duplicate removal.
+
+- **endog**  
+  Endogenous fraction, calculated as:  
+  `mapped_fragments_unique / raw_fragments`.
+
+- **duprate**  
+  Fragment-level duplication rate, calculated as:  
+  `1 − (mapped_fragments_unique / mapped_fragments_all)`.
+
+---
+
+### Alignment and coverage statistics
+
+- **avg_readlen**  
+  Average length (bp) of mapped reads after duplicate removal.
+
+- **mapped_bp**  
+  Total number of mapped base pairs, estimated as:  
+  `mapped_reads_all × avg_readlen`.
+
+- **avg_depth**  
+  Genome-wide average read depth, calculated as a length-weighted mean  
+  of per-contig mean depth reported by `samtools coverage`.
+
+- **pct_covered**  
+  Genome-wide percentage of reference bases covered by at least one read (≥1×),  
+  calculated as a length-weighted average across contigs.
+
+---
+
+### Notes
+
+- All statistics are pilot-aware when pilot mode is enabled.
+- Fragment-level statistics should be preferred over read-level statistics for paired-end and ancient DNA datasets.
+- Coverage and depth statistics are computed on the final duplicate-removed BAM.
 
 ---
 
