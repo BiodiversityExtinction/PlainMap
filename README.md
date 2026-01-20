@@ -383,8 +383,10 @@ All statistics are **fragment-aware**, meaning paired-end reads are counted as a
   `mapped_fragments_unique / raw_fragments`.
 
 - **duprate**  
-  Fragment-level duplication rate, calculated as:  
-  `1 − (mapped_fragments_unique / mapped_fragments_all)`.
+  Fragment-level duplication rate, calculated from `samtools markdup` duplicate flags as:  
+  `duplicate_mapped_fragments / mapped_fragments_all`,  
+  where duplicate fragments are those flagged with SAM bit `0x400` (PCR/optical duplicate).
+
 
 ---
 
