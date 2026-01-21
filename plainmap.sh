@@ -4,7 +4,7 @@
 #
 # Key features:
 # - Manifest input (plain text list of FASTQ.gz files)
-# - FASTQ header detection supports Illumina/CASAVA (" 1:"/" 2:") and ENA ("/1","/2")
+# - FASTQ header detection supports Illumina/CASAVA (" 1:"/" 2:"), ENA ("/1","/2"), and common SRA (".1",".2")
 # - Mixed SE + PE supported (seq_mode: SE | PE | MIX)
 # - Optional pre-fastp chunking (safety valve for huge inputs)
 # - Optional pilot subsampling (pre-fastp; applied per unit/chunk)
@@ -13,6 +13,11 @@
 # - pigz used automatically if available (faster gz test/decompress/compress)
 # - Parallel-safe BWA indexing via filesystem lock
 # - Fragment-aware stats; duplication rate computed from samtools markdup duplicate flags (never negative)
+#
+# Library types:
+#   modern     : bwa mem; maps PE + SE (merged+unpaired) separately then merges BAMs
+#   ancient    : bwa aln/samse; maps ONLY pooled SE (merged+unpaired+SE) (classic aDNA workflow)
+#   historical : bwa aln; maps pooled PE as PE (aln+sampe) AND pooled SE as SE (aln+samse)
 #
 set -euo pipefail
 
@@ -31,10 +36,10 @@ VERSION="0.1"
 
 THREADS=1
 MINLEN=30
-MISMATCH=0.01              # bwa aln -n (ancient)
-LIBTYPE="modern"           # modern|ancient
+MISMATCH=0.01              # bwa aln -n (ancient/historical)
+LIBTYPE="modern"           # modern|ancient|historical
 MAX_READS_PER_CHUNK=0      # 0 disables pre-fastp chunking
-PILOT_FRAGMENTS=0          # 0 disables pilot mode; otherwise limit reads per unit/chunk BEFORE fastp
+PILOT_FRAGMENTS=0          # 0 disables pilot; otherwise limit reads per unit/chunk BEFORE fastp
 MAPQ=20                    # mapping quality threshold (samtools view -q)
 
 ADAPTER_R1=""
@@ -68,22 +73,22 @@ Required:
   --outdir DIR
 
 Optional:
-  --library-type modern|ancient     (default: modern)
-  -t, --threads INT                (default: 1)
-  --minlength INT                   (default: 30)
-  --mismatch FLOAT                  (ancient only; bwa aln -n; default: 0.01)
-  --mapq INT                       Mapping quality threshold (default: 20)
-  --max-reads-per-chunk INT         (default: 0; disabled) pre-fastp chunking safety valve
-  --pilot-fragments INT            (default: 0; disabled) limit reads per unit/chunk before fastp
+  --library-type modern|ancient|historical   (default: modern)
+  --threads INT                              (default: 1)
+  --minlength INT                            (default: 30)
+  --mismatch FLOAT                           (ancient/historical; bwa aln -n; default: 0.01)
+  --mapq INT                                 Mapping quality threshold (default: 20)
+  --max-reads-per-chunk INT                  (default: 0; disabled) pre-fastp chunking safety valve
+  --pilot-fragments INT                      (default: 0; disabled) limit reads per unit/chunk before fastp
   --adapter-r1 SEQ
   --adapter-r2 SEQ
-  --trim-only                      Trim only (fastp); exit before mapping
-  --tmpdir DIR                     Custom temp dir (e.g. node-local scratch)
-  --keep-intermediate              Keep <outdir>/<prefix>/work
+  --trim-only                                Trim only (fastp); exit before mapping
+  --tmpdir DIR                               Custom temp dir (e.g. node-local scratch)
+  --keep-intermediate                        Keep <outdir>/<prefix>/work
   --resume | --no-resume
-  --dry-run                        Print plan only
-  --validate                       Check tools + gzip/pigz -t all manifest FASTQs, then exit
-  --reset                          Clear ALL checkpoints for this sample
+  --dry-run                                  Print plan only
+  --validate                                 Check tools + gzip/pigz -t all manifest FASTQs, then exit
+  --reset                                    Clear ALL checkpoints for this sample
 
 Tool overrides:
   --fastp CMD
@@ -96,7 +101,7 @@ exit 0
 }
 
 ###############################################################################
-# PARSE ARGS
+# PARSE ARGS (double-dash only)
 ###############################################################################
 MANIFEST=""
 SAMPLE=""
@@ -110,7 +115,7 @@ while [[ $# -gt 0 ]]; do
     --ref) REF="$2"; shift 2 ;;
     --outdir) OUT="$2"; shift 2 ;;
     --library-type) LIBTYPE="$2"; shift 2 ;;
-    -t|--threads) THREADS="$2"; shift 2 ;;
+    --threads) THREADS="$2"; shift 2 ;;
     --minlength) MINLEN="$2"; shift 2 ;;
     --mismatch) MISMATCH="$2"; shift 2 ;;
     --mapq) MAPQ="$2"; shift 2 ;;
@@ -137,7 +142,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$MANIFEST" || -z "$SAMPLE" || -z "$REF" || -z "$OUT" ]] && usage
-[[ "$LIBTYPE" == "modern" || "$LIBTYPE" == "ancient" ]] || { echo "ERROR: -library-type must be modern|ancient"; exit 1; }
+[[ "$LIBTYPE" == "modern" || "$LIBTYPE" == "ancient" || "$LIBTYPE" == "historical" ]] || {
+  echo "ERROR: --library-type must be modern|ancient|historical"
+  exit 1
+}
 [[ "$MAPQ" =~ ^[0-9]+$ ]] || { echo "ERROR: --mapq must be an integer"; exit 1; }
 
 ###############################################################################
@@ -181,7 +189,7 @@ WORK="$OUT/${SAMPLE}/work"
 RAW="$WORK/raw"
 CHUNKS="$WORK/chunks"          # pre-fastp chunks
 TMPBASE="$WORK/tmp"
-MAPCHUNKS="$WORK/mapchunks"    # post-fastp mapping chunks (optional)
+MAPCHUNKS="$WORK/mapchunks"    # post-fastp mapping chunks (optional; reuse max-reads-per-chunk)
 BAMS="$WORK/bams"
 FINAL="$WORK/final"
 CKPT="$WORK/.checkpoints"
@@ -247,14 +255,14 @@ quick_preflight() {
   require_cmd split
   require_cmd "$FASTP"; require_cmd "$BWA"; require_cmd "$SAMTOOLS"; require_cmd "$PYTHON"
   check_split_filter_support
-  if [[ "$LIBTYPE" == "ancient" ]]; then
-    require_cmd "$MAPDAMAGE"
-  fi
   if [[ $HAVE_PIGZ -eq 1 ]]; then
     require_cmd pigz
   else
     require_cmd gzip
     require_cmd zcat
+  fi
+  if [[ "$LIBTYPE" == "ancient" ]]; then
+    require_cmd "$MAPDAMAGE"
   fi
 }
 
@@ -289,11 +297,11 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  library_type:        $LIBTYPE"
   log "  threads:             $THREADS"
   log "  minlength:           $MINLEN"
-  log "  mismatch (ancient):  $MISMATCH"
+  log "  mismatch (aln):      $MISMATCH"
   log "  mapq:                $MAPQ"
   log "  pilot_fragments:     $PILOT_FRAGMENTS"
   log "  max_reads_per_chunk: $MAX_READS_PER_CHUNK"
-  log "Planned steps: read manifest -> pre-fastp chunk (optional) -> pilot (optional) -> fastp -> pool -> map -> dedup -> RG -> coverage -> stats"
+  log "Planned: manifest -> pre-fastp chunk (optional) -> pilot (optional) -> fastp -> pool -> map -> dedup -> RG -> coverage -> stats"
   exit 0
 fi
 
@@ -385,7 +393,7 @@ PY
 }
 
 ###############################################################################
-# READ HEADER CLASSIFIER (Illumina + ENA)
+# READ HEADER CLASSIFIER (Illumina + ENA + SRA)
 ###############################################################################
 classify_fastq_direction() {
   # prints: R1 | R2 | UNKNOWN
@@ -405,7 +413,6 @@ classify_fastq_direction() {
   # SRA style: first token ends with .1 or .2
   if [[ "$firsttok" == *.1 ]]; then echo "R1"; return; fi
   if [[ "$firsttok" == *.2 ]]; then echo "R2"; return; fi
-
 
   echo "UNKNOWN"
 }
@@ -431,7 +438,7 @@ while read -r f; do
   elif [[ "$dir" == "R2" ]]; then
     R2_LIST+=( "$f" )
   else
-    die "Could not classify FASTQ direction (Illumina ' 1:'/' 2:' or ENA '/1' '/2' expected): $f"
+    die "Could not classify FASTQ direction (Illumina ' 1:'/' 2:' or ENA '/1' '/2' or SRA '.1' '.2' expected): $f"
   fi
 done < "$MANIFEST"
 
@@ -619,8 +626,11 @@ for ((u=0; u<PE_N; u++)); do
     file_nonempty "$trim1" || die "fastp produced empty trimmed R1 for $unit.$cid"
     file_nonempty "$trim2" || die "fastp produced empty trimmed R2 for $unit.$cid"
 
+    # Unmerged (still PE)
     cat "$trim1" >> "$POOL_PE_R1"
     cat "$trim2" >> "$POOL_PE_R2"
+
+    # Merged + rescued (SE-like)
     file_nonempty "$merged" && cat "$merged" >> "$POOL_SE_ALL"
     file_nonempty "$up1"   && cat "$up1"   >> "$POOL_SE_ALL"
     file_nonempty "$up2"   && cat "$up2"   >> "$POOL_SE_ALL"
@@ -645,6 +655,8 @@ print(max(0, (r1+r2) - 2*tp))
 PY
 )
     UNPAIRED_READS=$(py_add "$UNPAIRED_READS" "$unpaired")
+
+    # trimmed fragments in pooled SE also include merged + unpaired
     TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$merged_reads")
     TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$unpaired")
 
@@ -757,6 +769,7 @@ make_mapchunks_se "$POOL_SE_ALL" "$MAPCHUNKS/${SAMPLE}.SE_"
 log "STEP: mapping"
 rm -f "$BAMS/${SAMPLE}."*.bam 2>/dev/null || true
 
+# modern SE
 map_se_mem_chunk() {
   local fq="$1" outbam="$2" tag="$3"
   "$BWA" mem -t "$THREADS" "$REF" "$fq" > "$TMP/${SAMPLE}.${tag}.sam"
@@ -765,6 +778,7 @@ map_se_mem_chunk() {
   rm -f "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam"
 }
 
+# modern PE
 map_pe_mem_chunk() {
   local fq1="$1" fq2="$2" outbam="$3" tag="$4"
   "$BWA" mem -t "$THREADS" "$REF" "$fq1" "$fq2" > "$TMP/${SAMPLE}.${tag}.sam"
@@ -773,6 +787,7 @@ map_pe_mem_chunk() {
   rm -f "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam"
 }
 
+# aln SE
 map_se_aln_chunk() {
   local fq="$1" outbam="$2" tag="$3"
   "$BWA" aln -l 999 -n "$MISMATCH" -t "$THREADS" "$REF" "$fq" > "$TMP/${SAMPLE}.${tag}.sai"
@@ -780,6 +795,17 @@ map_se_aln_chunk() {
   "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.${tag}.sam" > "$TMP/${SAMPLE}.${tag}.bam.tmp"
   "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$outbam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
   rm -f "$TMP/${SAMPLE}.${tag}.sai" "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
+}
+
+# aln PE
+map_pe_aln_chunk() {
+  local fq1="$1" fq2="$2" outbam="$3" tag="$4"
+  "$BWA" aln -l 999 -n "$MISMATCH" -t "$THREADS" "$REF" "$fq1" > "$TMP/${SAMPLE}.${tag}.1.sai"
+  "$BWA" aln -l 999 -n "$MISMATCH" -t "$THREADS" "$REF" "$fq2" > "$TMP/${SAMPLE}.${tag}.2.sai"
+  "$BWA" sampe "$REF" "$TMP/${SAMPLE}.${tag}.1.sai" "$TMP/${SAMPLE}.${tag}.2.sai" "$fq1" "$fq2" > "$TMP/${SAMPLE}.${tag}.sam"
+  "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.${tag}.sam" > "$TMP/${SAMPLE}.${tag}.bam.tmp"
+  "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$outbam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
+  rm -f "$TMP/${SAMPLE}.${tag}.1.sai" "$TMP/${SAMPLE}.${tag}.2.sai" "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
 }
 
 if [[ "$LIBTYPE" == "modern" ]]; then
@@ -794,7 +820,7 @@ if [[ "$LIBTYPE" == "modern" ]]; then
       r2c="$MAPCHUNKS/${SAMPLE}.PE.R2_${cid}.fastq.gz"
       [[ -f "$r2c" ]] || die "Missing PE R2 mapchunk: $r2c"
       outbam="$BAMS/${SAMPLE}.MAP.PE.${cid}.bam"
-      log "  Mapping PE chunk ${cid}"
+      log "  Mapping PE chunk ${cid} (mem)"
       map_pe_mem_chunk "$r1c" "$r2c" "$outbam" "mem.PE.${cid}"
     done
   fi
@@ -808,12 +834,13 @@ if [[ "$LIBTYPE" == "modern" ]]; then
       cid="${base#${SAMPLE}.SE_}"
       cid="${cid%.fastq.gz}"
       outbam="$BAMS/${SAMPLE}.MAP.SE.${cid}.bam"
-      log "  Mapping SE chunk ${cid}"
+      log "  Mapping SE chunk ${cid} (mem)"
       map_se_mem_chunk "$sec" "$outbam" "mem.SE.${cid}"
     done
   fi
-else
-  # Ancient mapping: pooled SE is required (SE + merged + unpaired)
+
+elif [[ "$LIBTYPE" == "ancient" ]]; then
+  # Ancient mapping: pooled SE is required; do NOT map unmerged PE
   [[ -s "$POOL_SE_ALL" ]] || die "Ancient mode requires pooled SE input (merged/unpaired/SE); got empty: $POOL_SE_ALL"
   se_chunks=( "$MAPCHUNKS/${SAMPLE}.SE_"*.fastq.gz )
   [[ ${#se_chunks[@]} -gt 0 ]] || die "Expected SE mapchunks but found none"
@@ -822,9 +849,39 @@ else
     cid="${base#${SAMPLE}.SE_}"
     cid="${cid%.fastq.gz}"
     outbam="$BAMS/${SAMPLE}.MAP.SE.${cid}.bam"
-    log "  Mapping ancient SE chunk ${cid} (bwa aln)"
+    log "  Mapping ancient SE chunk ${cid} (aln/samse)"
     map_se_aln_chunk "$sec" "$outbam" "aln.SE.${cid}"
   done
+
+else
+  # historical: aln + map BOTH unmerged PE and pooled SE (merged+unpaired+SE)
+  if [[ -s "$POOL_PE_R1" && -s "$POOL_PE_R2" ]]; then
+    pe_r1_chunks=( "$MAPCHUNKS/${SAMPLE}.PE.R1_"*.fastq.gz )
+    [[ ${#pe_r1_chunks[@]} -gt 0 ]] || die "Expected PE mapchunks but found none"
+    for r1c in "${pe_r1_chunks[@]}"; do
+      base=$(basename "$r1c")
+      cid="${base#${SAMPLE}.PE.R1_}"
+      cid="${cid%.fastq.gz}"
+      r2c="$MAPCHUNKS/${SAMPLE}.PE.R2_${cid}.fastq.gz"
+      [[ -f "$r2c" ]] || die "Missing PE R2 mapchunk: $r2c"
+      outbam="$BAMS/${SAMPLE}.MAP.PE.${cid}.bam"
+      log "  Mapping historical PE chunk ${cid} (aln/sampe)"
+      map_pe_aln_chunk "$r1c" "$r2c" "$outbam" "aln.PE.${cid}"
+    done
+  fi
+
+  if [[ -s "$POOL_SE_ALL" ]]; then
+    se_chunks=( "$MAPCHUNKS/${SAMPLE}.SE_"*.fastq.gz )
+    [[ ${#se_chunks[@]} -gt 0 ]] || die "Expected SE mapchunks but found none"
+    for sec in "${se_chunks[@]}"; do
+      base=$(basename "$sec")
+      cid="${base#${SAMPLE}.SE_}"
+      cid="${cid%.fastq.gz}"
+      outbam="$BAMS/${SAMPLE}.MAP.SE.${cid}.bam"
+      log "  Mapping historical SE chunk ${cid} (aln/samse)"
+      map_se_aln_chunk "$sec" "$outbam" "aln.SE.${cid}"
+    done
+  fi
 fi
 
 bam_list=( "$BAMS/${SAMPLE}."*.bam )
@@ -846,7 +903,9 @@ DEDUP_BAM="$FINAL/${SAMPLE}.dedup.bam"
 
 log "STEP: dedup (mark duplicates, then filter; duprate from duplicate flags)"
 
-if [[ "$LIBTYPE" == "modern" && "$SEQ_MODE" != "SE" ]]; then
+# If we have paired-end data mapped (modern MIX/PE or historical MIX/PE), use fixmate workflow.
+# For ancient, we are effectively SE-only mapping.
+if [[ ( "$LIBTYPE" == "modern" || "$LIBTYPE" == "historical" ) && "$SEQ_MODE" != "SE" ]]; then
   "$SAMTOOLS" sort -n -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.namesort.bam" "$MERGED_BAM"
   "$SAMTOOLS" fixmate -m -@ "$SORT_THREADS" "$FINAL/${SAMPLE}.namesort.bam" "$FINAL/${SAMPLE}.fixmate.bam"
   "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.coordsort.bam" "$FINAL/${SAMPLE}.fixmate.bam"
