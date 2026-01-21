@@ -62,18 +62,18 @@ cat <<EOF
 PlainMap v$VERSION
 
 Required:
-  -manifest FILE
-  -prefix STRING
-  -ref FILE
-  -outdir DIR
+  --manifest FILE
+  --prefix STRING
+  --ref FILE
+  --outdir DIR
 
 Optional:
-  -library-type modern|ancient     (default: modern)
+  --library-type modern|ancient     (default: modern)
   -t, --threads INT                (default: 1)
-  -minlength INT                   (default: 30)
-  -mismatch FLOAT                  (ancient only; bwa aln -n; default: 0.01)
+  --minlength INT                   (default: 30)
+  --mismatch FLOAT                  (ancient only; bwa aln -n; default: 0.01)
   --mapq INT                       Mapping quality threshold (default: 20)
-  -max-reads-per-chunk INT         (default: 0; disabled) pre-fastp chunking safety valve
+  --max-reads-per-chunk INT         (default: 0; disabled) pre-fastp chunking safety valve
   --pilot-fragments INT            (default: 0; disabled) limit reads per unit/chunk before fastp
   --adapter-r1 SEQ
   --adapter-r2 SEQ
@@ -105,16 +105,16 @@ OUT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -manifest) MANIFEST="$2"; shift 2 ;;
-    -prefix) SAMPLE="$2"; shift 2 ;;
-    -ref) REF="$2"; shift 2 ;;
-    -outdir) OUT="$2"; shift 2 ;;
-    -library-type) LIBTYPE="$2"; shift 2 ;;
+    --manifest) MANIFEST="$2"; shift 2 ;;
+    --prefix) SAMPLE="$2"; shift 2 ;;
+    --ref) REF="$2"; shift 2 ;;
+    --outdir) OUT="$2"; shift 2 ;;
+    --library-type) LIBTYPE="$2"; shift 2 ;;
     -t|--threads) THREADS="$2"; shift 2 ;;
-    -minlength) MINLEN="$2"; shift 2 ;;
-    -mismatch) MISMATCH="$2"; shift 2 ;;
+    --minlength) MINLEN="$2"; shift 2 ;;
+    --mismatch) MISMATCH="$2"; shift 2 ;;
     --mapq) MAPQ="$2"; shift 2 ;;
-    -max-reads-per-chunk) MAX_READS_PER_CHUNK="$2"; shift 2 ;;
+    --max-reads-per-chunk) MAX_READS_PER_CHUNK="$2"; shift 2 ;;
     --pilot-fragments) PILOT_FRAGMENTS="$2"; shift 2 ;;
     --adapter-r1) ADAPTER_R1="$2"; shift 2 ;;
     --adapter-r2) ADAPTER_R2="$2"; shift 2 ;;
