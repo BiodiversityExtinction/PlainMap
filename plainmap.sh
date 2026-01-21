@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # PlainMap v0.1
 # Transparent, failure-aware mapping pipeline for ancient and modern DNA
-# - Manifest input (txt file), mixed SE/PE supported
+#
+# Key features:
+# - Manifest input (plain text list of FASTQ.gz files)
 # - FASTQ header detection supports Illumina/CASAVA (" 1:"/" 2:") and ENA ("/1","/2")
+# - Mixed SE + PE supported (seq_mode: SE | PE | MIX)
 # - Optional pre-fastp chunking (safety valve for huge inputs)
 # - Optional pilot subsampling (pre-fastp; applied per unit/chunk)
 # - fastp JSON only (no HTML)
-# - Pool after trimming, then map once (with optional mapping chunking)
-# - pigz used automatically if available
+# - Pool after trimming, then map once (with optional post-fastp mapping chunking)
+# - pigz used automatically if available (faster gz test/decompress/compress)
 # - Parallel-safe BWA indexing via filesystem lock
-# - Fragment-aware stats; duplication rate computed from duplicate flags (never negative)
-
+# - Fragment-aware stats; duplication rate computed from samtools markdup duplicate flags (never negative)
+#
 set -euo pipefail
 
 ###############################################################################
@@ -31,9 +34,8 @@ MINLEN=30
 MISMATCH=0.01              # bwa aln -n (ancient)
 LIBTYPE="modern"           # modern|ancient
 MAX_READS_PER_CHUNK=0      # 0 disables pre-fastp chunking
-MAPQ=20
-
 PILOT_FRAGMENTS=0          # 0 disables pilot mode; otherwise limit reads per unit/chunk BEFORE fastp
+MAPQ=20                    # mapping quality threshold (samtools view -q)
 
 ADAPTER_R1=""
 ADAPTER_R2=""
@@ -43,7 +45,6 @@ DRYRUN=0
 VALIDATE_ONLY=0
 RESUME=1
 KEEP_INTERMEDIATE=0
-
 TMPDIR_USER=""
 RESET=0
 
@@ -71,6 +72,7 @@ Optional:
   -t, --threads INT                (default: 1)
   -minlength INT                   (default: 30)
   -mismatch FLOAT                  (ancient only; bwa aln -n; default: 0.01)
+  --mapq INT                       Mapping quality threshold (default: 20)
   -max-reads-per-chunk INT         (default: 0; disabled) pre-fastp chunking safety valve
   --pilot-fragments INT            (default: 0; disabled) limit reads per unit/chunk before fastp
   --adapter-r1 SEQ
@@ -111,6 +113,7 @@ while [[ $# -gt 0 ]]; do
     -t|--threads) THREADS="$2"; shift 2 ;;
     -minlength) MINLEN="$2"; shift 2 ;;
     -mismatch) MISMATCH="$2"; shift 2 ;;
+    --mapq) MAPQ="$2"; shift 2 ;;
     -max-reads-per-chunk) MAX_READS_PER_CHUNK="$2"; shift 2 ;;
     --pilot-fragments) PILOT_FRAGMENTS="$2"; shift 2 ;;
     --adapter-r1) ADAPTER_R1="$2"; shift 2 ;;
@@ -135,6 +138,7 @@ done
 
 [[ -z "$MANIFEST" || -z "$SAMPLE" || -z "$REF" || -z "$OUT" ]] && usage
 [[ "$LIBTYPE" == "modern" || "$LIBTYPE" == "ancient" ]] || { echo "ERROR: -library-type must be modern|ancient"; exit 1; }
+[[ "$MAPQ" =~ ^[0-9]+$ ]] || { echo "ERROR: --mapq must be an integer"; exit 1; }
 
 ###############################################################################
 # PATH RESOLUTION
@@ -168,7 +172,6 @@ log() { echo "[$(date '+%F %T')] $*"; }
 die() { log "ERROR: $*"; exit 1; }
 
 PIPE_T0=$(date +%s)
-
 SORT_THREADS=$(( THREADS > 2 ? THREADS / 2 : 1 ))
 
 ###############################################################################
@@ -247,7 +250,6 @@ quick_preflight() {
   if [[ "$LIBTYPE" == "ancient" ]]; then
     require_cmd "$MAPDAMAGE"
   fi
-  # gzip/pigz tools
   if [[ $HAVE_PIGZ -eq 1 ]]; then
     require_cmd pigz
   else
@@ -284,12 +286,13 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  ref:      $REF"
   log "  outdir:   $OUT"
   log "Settings:"
-  log "  library_type:       $LIBTYPE"
-  log "  threads:            $THREADS"
-  log "  minlength:          $MINLEN"
-  log "  mismatch (ancient): $MISMATCH"
-  log "  pilot_fragments:    $PILOT_FRAGMENTS"
-  log "  max_reads_per_chunk:$MAX_READS_PER_CHUNK"
+  log "  library_type:        $LIBTYPE"
+  log "  threads:             $THREADS"
+  log "  minlength:           $MINLEN"
+  log "  mismatch (ancient):  $MISMATCH"
+  log "  mapq:                $MAPQ"
+  log "  pilot_fragments:     $PILOT_FRAGMENTS"
+  log "  max_reads_per_chunk: $MAX_READS_PER_CHUNK"
   log "Planned steps: read manifest -> pre-fastp chunk (optional) -> pilot (optional) -> fastp -> pool -> map -> dedup -> RG -> coverage -> stats"
   exit 0
 fi
@@ -342,17 +345,13 @@ run_fastp() {
 }
 
 FASTP_ARGS=( -l "$MINLEN" -g -w "$THREADS" )
-# adapters: if provided explicitly, use them; otherwise for PE we will use --detect_adapter_for_pe
 [[ -n "$ADAPTER_R1" ]] && FASTP_ARGS+=( --adapter_sequence "$ADAPTER_R1" )
 [[ -n "$ADAPTER_R2" ]] && FASTP_ARGS+=( --adapter_sequence_r2 "$ADAPTER_R2" )
 
 ###############################################################################
 # STATS HELPERS
 ###############################################################################
-count_reads_fastq_gz() {
-  # counts reads (NR/4) in gz fastq
-  "${ZCAT[@]}" "$1" | awk 'END{print NR/4}'
-}
+count_reads_fastq_gz() { "${ZCAT[@]}" "$1" | awk 'END{print NR/4}'; }
 
 json_get_int() {
   "$PYTHON" - "$1" "$2" <<'PY'
@@ -395,22 +394,13 @@ classify_fastq_direction() {
   hdr=$("${ZCAT[@]}" "$fq" | head -n 1 || true)
 
   # Illumina/CASAVA: has ' 1:' or ' 2:' token
-  if [[ "$hdr" == *" 1:"* ]]; then
-    echo "R1"; return
-  fi
-  if [[ "$hdr" == *" 2:"* ]]; then
-    echo "R2"; return
-  fi
+  if [[ "$hdr" == *" 1:"* ]]; then echo "R1"; return; fi
+  if [[ "$hdr" == *" 2:"* ]]; then echo "R2"; return; fi
 
   # ENA style: first token ends with /1 or /2
-  # Example: @ERR123.1/1
   local firsttok="${hdr%% *}"
-  if [[ "$firsttok" == */1 ]]; then
-    echo "R1"; return
-  fi
-  if [[ "$firsttok" == */2 ]]; then
-    echo "R2"; return
-  fi
+  if [[ "$firsttok" == */1 ]]; then echo "R1"; return; fi
+  if [[ "$firsttok" == */2 ]]; then echo "R2"; return; fi
 
   echo "UNKNOWN"
 }
@@ -418,13 +408,6 @@ classify_fastq_direction() {
 ###############################################################################
 # MANIFEST -> UNITS
 ###############################################################################
-# Units:
-# - SE unit: one FASTQ (R1)
-# - PE unit: paired FASTQs (one R1 + one R2) matched by order encountered
-#
-# NOTE: This assumes the manifest lists PE R1/R2 in matching counts (order can be mixed).
-# PlainMap groups by header direction, then pairs by encounter order.
-
 SE_LIST=()
 R1_LIST=()
 R2_LIST=()
@@ -449,8 +432,8 @@ done < "$MANIFEST"
 
 [[ $TOTAL_FILES -gt 0 ]] || die "Manifest empty: $MANIFEST"
 [[ ${#R1_LIST[@]} -gt 0 ]] || die "No R1 reads found in manifest"
+[[ ${#R2_LIST[@]} -le ${#R1_LIST[@]} ]] || die "More R2 than R1 files found; manifest pairing inconsistent"
 
-# Pair up as much as possible
 PE_N=$(( ${#R1_LIST[@]} < ${#R2_LIST[@]} ? ${#R1_LIST[@]} : ${#R2_LIST[@]} ))
 SE_N=$(( ${#R1_LIST[@]} - PE_N ))
 
@@ -460,13 +443,8 @@ if [[ $PE_N -gt 0 && $SE_N -gt 0 ]]; then
 elif [[ $PE_N -gt 0 ]]; then
   SEQ_MODE="PE"
 fi
-
 log "Detected sequencing mode: $SEQ_MODE (R1 files: ${#R1_LIST[@]}, R2 files: ${#R2_LIST[@]})"
-if [[ ${#R2_LIST[@]} -gt ${#R1_LIST[@]} ]]; then
-  die "More R2 than R1 files found; manifest pairing inconsistent"
-fi
 
-# Build SE list (R1 leftovers after pairing)
 if [[ $SE_N -gt 0 ]]; then
   for ((i=PE_N; i<${#R1_LIST[@]}; i++)); do
     SE_LIST+=( "${R1_LIST[$i]}" )
@@ -474,18 +452,8 @@ if [[ $SE_N -gt 0 ]]; then
 fi
 
 ###############################################################################
-# PRE-FASTP CHUNKING
+# PRE-FASTP CHUNKING HELPERS
 ###############################################################################
-# We always produce "unit chunks" under $CHUNKS:
-# - SE chunk:  <SAMPLE>.<UNITID>.SE_XXXX.fastq.gz
-# - PE chunks: <SAMPLE>.<UNITID>.R1_XXXX.fastq.gz and ...R2_XXXX.fastq.gz
-#
-# If MAX_READS_PER_CHUNK=0 -> link original as a single chunk.
-# Else -> split into chunks with up to MAX_READS_PER_CHUNK reads.
-#
-# If PILOT_FRAGMENTS>0 -> before running fastp on a chunk, we limit input reads
-# to PILOT_FRAGMENTS (SE reads or PE pairs) for that chunk. This is per chunk.
-
 split_fastq_gz() {
   local in="$1" outprefix="$2" reads="$3"
   local lines=$((reads * 4))
@@ -499,8 +467,6 @@ split_fastq_gz() {
 }
 
 limit_fastq_gz() {
-  # limit reads in gz FASTQ to N reads; write gz FASTQ
-  # Uses head which can SIGPIPE upstream; disable pipefail in this function.
   local in="$1" out="$2" reads="$3"
   local lines=$((reads * 4))
   set +o pipefail
@@ -515,7 +481,6 @@ limit_fastq_gz() {
 make_chunks() {
   log "STEP: pre-fastp chunking"
   ckpt_clear chunk
-
   rm -f "$CHUNKS/${SAMPLE}."*".fastq.gz" 2>/dev/null || true
 
   # PE units
@@ -570,7 +535,8 @@ fi
 ###############################################################################
 POOL_PE_R1="$RAW/${SAMPLE}.pool.PE.R1.fastq.gz"
 POOL_PE_R2="$RAW/${SAMPLE}.pool.PE.R2.fastq.gz"
-POOL_SE_ALL="$RAW/${SAMPLE}.pool.SE.all.fastq.gz"   # all SE to be mapped as SE (SE units + merged + rescued)
+POOL_SE_ALL="$RAW/${SAMPLE}.pool.SE.all.fastq.gz"   # SE units + merged + rescued
+
 : > "$POOL_PE_R1"
 : > "$POOL_PE_R2"
 : > "$POOL_SE_ALL"
@@ -583,21 +549,21 @@ TRIMMED_FRAGMENTS=0
 MERGED_READS=0
 UNPAIRED_READS=0
 
-log "STEP: fastp per pre-fastp chunk (JSON only) + pooling"
-
-# Helper: add integer safely
 py_add() { "$PYTHON" - "$1" "$2" <<'PY'
 import sys
 print(int(sys.argv[1]) + int(sys.argv[2]))
 PY
 }
 
-# Process PE chunks
+log "STEP: fastp per pre-fastp chunk (JSON only) + pooling"
 shopt -s nullglob
+
+# PE chunks
 for ((u=0; u<PE_N; u++)); do
   unit="U$(printf '%08d' $u)"
   r1_chunks=( "$CHUNKS/${SAMPLE}.${unit}.R1_"*.fastq.gz )
   [[ ${#r1_chunks[@]} -gt 0 ]] || die "No R1 chunks for PE unit $unit"
+
   for r1c in "${r1_chunks[@]}"; do
     base=$(basename "$r1c")
     cid="${base#${SAMPLE}.${unit}.R1_}"
@@ -605,8 +571,6 @@ for ((u=0; u<PE_N; u++)); do
     r2c="$CHUNKS/${SAMPLE}.${unit}.R2_${cid}.fastq.gz"
     [[ -f "$r2c" ]] || die "Missing R2 chunk for PE unit $unit chunk $cid: $r2c"
 
-    # raw counts (pilot-aware later; these are counts of what we will process)
-    # we count after pilot limiting decision so raw_* reflect processed reads.
     in_r1="$r1c"
     in_r2="$r2c"
 
@@ -620,13 +584,11 @@ for ((u=0; u<PE_N; u++)); do
       in_r2="$lim_r2"
     fi
 
-    # update RAW counts based on processed input
     r1n=$(count_reads_fastq_gz "$in_r1")
     r2n=$(count_reads_fastq_gz "$in_r2")
     RAW_R1_READS=$(py_add "$RAW_R1_READS" "$r1n")
     RAW_R2_READS=$(py_add "$RAW_R2_READS" "$r2n")
-    # fragment count for PE is by R1
-    RAW_FRAGMENTS=$(py_add "$RAW_FRAGMENTS" "$r1n")
+    RAW_FRAGMENTS=$(py_add "$RAW_FRAGMENTS" "$r1n")   # PE fragments counted by R1
 
     fastp_err="$TMP/fastp_${SAMPLE}.${unit}.${cid}.stderr.log"
     fp_json="$REPORTS/${SAMPLE}.${unit}.${cid}.fastp.json"
@@ -637,7 +599,6 @@ for ((u=0; u<PE_N; u++)); do
     up1="$TMP/${SAMPLE}.${unit}.${cid}.unpaired1.fastq.gz"
     up2="$TMP/${SAMPLE}.${unit}.${cid}.unpaired2.fastq.gz"
 
-    # For PE, if adapters not explicitly provided, enable auto-detection.
     extra_pe=()
     if [[ -z "$ADAPTER_R1" && -z "$ADAPTER_R2" ]]; then
       extra_pe+=( --detect_adapter_for_pe )
@@ -653,21 +614,16 @@ for ((u=0; u<PE_N; u++)); do
     file_nonempty "$trim1" || die "fastp produced empty trimmed R1 for $unit.$cid"
     file_nonempty "$trim2" || die "fastp produced empty trimmed R2 for $unit.$cid"
 
-    # Append trimmed pairs to pooled PE
     cat "$trim1" >> "$POOL_PE_R1"
     cat "$trim2" >> "$POOL_PE_R2"
+    file_nonempty "$merged" && cat "$merged" >> "$POOL_SE_ALL"
+    file_nonempty "$up1"   && cat "$up1"   >> "$POOL_SE_ALL"
+    file_nonempty "$up2"   && cat "$up2"   >> "$POOL_SE_ALL"
 
-    # Append merged + unpaired to pooled SE-all
-    if file_nonempty "$merged"; then cat "$merged" >> "$POOL_SE_ALL"; fi
-    if file_nonempty "$up1"; then cat "$up1" >> "$POOL_SE_ALL"; fi
-    if file_nonempty "$up2"; then cat "$up2" >> "$POOL_SE_ALL"; fi
-
-    # Update trimming stats (fragment-aware)
     r1_after=$(json_get_int "$fp_json" "read1_after_filtering.total_reads")
     r2_after=$(json_get_int "$fp_json" "read2_after_filtering.total_reads")
     merged_reads=$(json_get_int "$fp_json" "merged_and_filtered.total_reads")
 
-    # trimmed paired fragments are the min of post-filter R1/R2
     tp=$("$PYTHON" - "$r1_after" "$r2_after" <<'PY'
 import sys
 print(min(int(sys.argv[1]), int(sys.argv[2])))
@@ -676,7 +632,6 @@ PY
     TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$tp")
     MERGED_READS=$(py_add "$MERGED_READS" "$merged_reads")
 
-    # unpaired reads (fragment count as reads, mapped later as SE)
     unpaired=$("$PYTHON" - "$r1_after" "$r2_after" <<'PY'
 import sys
 r1=int(sys.argv[1]); r2=int(sys.argv[2])
@@ -693,11 +648,12 @@ PY
   done
 done
 
-# Process SE chunks (R1-only units)
+# SE chunks
 for ((s=0; s<${#SE_LIST[@]}; s++)); do
   unit="S$(printf '%08d' $s)"
   se_chunks=( "$CHUNKS/${SAMPLE}.${unit}.SE_"*.fastq.gz )
   [[ ${#se_chunks[@]} -gt 0 ]] || die "No SE chunks for unit $unit"
+
   for sec in "${se_chunks[@]}"; do
     base=$(basename "$sec")
     cid="${base#${SAMPLE}.${unit}.SE_}"
@@ -724,8 +680,6 @@ for ((s=0; s<${#SE_LIST[@]}; s++)); do
       -j "$fp_json"
 
     file_nonempty "$trim_se" || die "fastp produced empty trimmed SE for $unit.$cid"
-
-    # Append to pooled SE-all
     cat "$trim_se" >> "$POOL_SE_ALL"
 
     se_after=$(json_get_int "$fp_json" "read1_after_filtering.total_reads")
@@ -736,11 +690,6 @@ for ((s=0; s<${#SE_LIST[@]}; s++)); do
   done
 done
 
-# If no PE data, pooled PE files may be empty; ensure they are truly empty files
-# (they already exist via : >)
-# Ensure SE pool exists (may be empty if no SE/merged/unpaired; that's ok for PE-only modern mapping)
-file_nonempty "$POOL_SE_ALL" || true
-
 ###############################################################################
 # TRIM-ONLY MODE
 ###############################################################################
@@ -750,9 +699,9 @@ if [[ $TRIM_ONLY -eq 1 ]]; then
   RATIO_TRIM=$(ratio "$TRIMMED_FRAGMENTS" "$RAW_FRAGMENTS")
 
   {
-    printf "sample\tlibrary_type\tseq_mode\tpilot_fragments\tmax_reads_per_chunk\traw_R1_reads\traw_R2_reads\traw_fragments\ttrimmed_fragments\tmerged_reads\tunpaired_reads\tpct_fragments_remaining\ttrimmed_over_raw\tmapped_reads_all\tmapped_reads_unique\tmapped_fragments_all\tmapped_fragments_unique\tendog\tduprate\tavg_readlen\tmapped_bp\tavg_depth\tpct_covered\n"
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\n" \
-      "$SAMPLE" "$LIBTYPE" "$SEQ_MODE" "$PILOT_FRAGMENTS" "$MAX_READS_PER_CHUNK" \
+    printf "sample\tlibrary_type\tseq_mode\tpilot_fragments\tmax_reads_per_chunk\tmapq\traw_R1_reads\traw_R2_reads\traw_fragments\ttrimmed_fragments\tmerged_reads\tunpaired_reads\tpct_fragments_remaining\ttrimmed_over_raw\tmapped_reads_all\tmapped_reads_unique\tmapped_fragments_all\tmapped_fragments_unique\tendog\tduprate\tavg_readlen\tmapped_bp\tavg_depth\tpct_covered\n"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\n" \
+      "$SAMPLE" "$LIBTYPE" "$SEQ_MODE" "$PILOT_FRAGMENTS" "$MAX_READS_PER_CHUNK" "$MAPQ" \
       "$RAW_R1_READS" "$RAW_R2_READS" "$RAW_FRAGMENTS" \
       "$TRIMMED_FRAGMENTS" "$MERGED_READS" "$UNPAIRED_READS" \
       "$PCT_REMAIN" "$RATIO_TRIM"
@@ -767,18 +716,11 @@ fi
 ###############################################################################
 # POST-FASTP MAPPING CHUNKING (OPTIONAL; REUSE MAX_READS_PER_CHUNK)
 ###############################################################################
-# To make mapping restartable/less memory-hungry, we optionally chunk pooled inputs again.
-# If MAX_READS_PER_CHUNK=0 -> map pooled files directly.
-# Else -> split pooled PE and SE pools into chunks of MAX_READS_PER_CHUNK reads/pairs.
-
 rm -f "$MAPCHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
 
 make_mapchunks_se() {
-  local in="$1"
-  local prefix="$2"
-  if [[ ! -s "$in" ]]; then
-    return
-  fi
+  local in="$1" prefix="$2"
+  [[ -s "$in" ]] || return 0
   if [[ "$MAX_READS_PER_CHUNK" -gt 0 ]]; then
     log "  Mapping chunking SE: splitting pooled SE (max reads/chunk: $MAX_READS_PER_CHUNK)"
     split_fastq_gz "$in" "$prefix" "$MAX_READS_PER_CHUNK"
@@ -789,9 +731,7 @@ make_mapchunks_se() {
 
 make_mapchunks_pe() {
   local in1="$1" in2="$2" prefix1="$3" prefix2="$4"
-  if [[ ! -s "$in1" || ! -s "$in2" ]]; then
-    return
-  fi
+  [[ -s "$in1" && -s "$in2" ]] || return 0
   if [[ "$MAX_READS_PER_CHUNK" -gt 0 ]]; then
     log "  Mapping chunking PE: splitting pooled PE (max reads/chunk: $MAX_READS_PER_CHUNK)"
     split_fastq_gz "$in1" "$prefix1" "$MAX_READS_PER_CHUNK"
@@ -813,19 +753,19 @@ log "STEP: mapping"
 rm -f "$BAMS/${SAMPLE}."*.bam 2>/dev/null || true
 
 map_se_mem_chunk() {
-  local fq="$1" outbam="$2"
-  "$BWA" mem -t "$THREADS" "$REF" "$fq" > "$TMP/${SAMPLE}.mem.SE.sam"
-  "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.mem.SE.sam" > "$TMP/${SAMPLE}.mem.SE.bam"
-  "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$outbam" "$TMP/${SAMPLE}.mem.SE.bam"
-  rm -f "$TMP/${SAMPLE}.mem.SE.sam" "$TMP/${SAMPLE}.mem.SE.bam"
+  local fq="$1" outbam="$2" tag="$3"
+  "$BWA" mem -t "$THREADS" "$REF" "$fq" > "$TMP/${SAMPLE}.${tag}.sam"
+  "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.${tag}.sam" > "$TMP/${SAMPLE}.${tag}.bam"
+  "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$outbam" "$TMP/${SAMPLE}.${tag}.bam"
+  rm -f "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam"
 }
 
 map_pe_mem_chunk() {
-  local fq1="$1" fq2="$2" outbam="$3"
-  "$BWA" mem -t "$THREADS" "$REF" "$fq1" "$fq2" > "$TMP/${SAMPLE}.mem.PE.sam"
-  "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.mem.PE.sam" > "$TMP/${SAMPLE}.mem.PE.bam"
-  "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$outbam" "$TMP/${SAMPLE}.mem.PE.bam"
-  rm -f "$TMP/${SAMPLE}.mem.PE.sam" "$TMP/${SAMPLE}.mem.PE.bam"
+  local fq1="$1" fq2="$2" outbam="$3" tag="$4"
+  "$BWA" mem -t "$THREADS" "$REF" "$fq1" "$fq2" > "$TMP/${SAMPLE}.${tag}.sam"
+  "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.${tag}.sam" > "$TMP/${SAMPLE}.${tag}.bam"
+  "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$outbam" "$TMP/${SAMPLE}.${tag}.bam"
+  rm -f "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam"
 }
 
 map_se_aln_chunk() {
@@ -837,11 +777,10 @@ map_se_aln_chunk() {
   rm -f "$TMP/${SAMPLE}.${tag}.sai" "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
 }
 
-# Modern mapping
 if [[ "$LIBTYPE" == "modern" ]]; then
-  # PE chunks
-  pe_r1_chunks=( "$MAPCHUNKS/${SAMPLE}.PE.R1_"*.fastq.gz )
+  # PE mapping if pooled PE exists
   if [[ -s "$POOL_PE_R1" && -s "$POOL_PE_R2" ]]; then
+    pe_r1_chunks=( "$MAPCHUNKS/${SAMPLE}.PE.R1_"*.fastq.gz )
     [[ ${#pe_r1_chunks[@]} -gt 0 ]] || die "Expected PE mapchunks but found none"
     for r1c in "${pe_r1_chunks[@]}"; do
       base=$(basename "$r1c")
@@ -851,13 +790,13 @@ if [[ "$LIBTYPE" == "modern" ]]; then
       [[ -f "$r2c" ]] || die "Missing PE R2 mapchunk: $r2c"
       outbam="$BAMS/${SAMPLE}.MAP.PE.${cid}.bam"
       log "  Mapping PE chunk ${cid}"
-      map_pe_mem_chunk "$r1c" "$r2c" "$outbam"
+      map_pe_mem_chunk "$r1c" "$r2c" "$outbam" "mem.PE.${cid}"
     done
   fi
 
-  # SE chunks (pooled SE: SE units + merged + unpaired)
-  se_chunks=( "$MAPCHUNKS/${SAMPLE}.SE_"*.fastq.gz )
+  # SE mapping if pooled SE exists
   if [[ -s "$POOL_SE_ALL" ]]; then
+    se_chunks=( "$MAPCHUNKS/${SAMPLE}.SE_"*.fastq.gz )
     [[ ${#se_chunks[@]} -gt 0 ]] || die "Expected SE mapchunks but found none"
     for sec in "${se_chunks[@]}"; do
       base=$(basename "$sec")
@@ -865,14 +804,13 @@ if [[ "$LIBTYPE" == "modern" ]]; then
       cid="${cid%.fastq.gz}"
       outbam="$BAMS/${SAMPLE}.MAP.SE.${cid}.bam"
       log "  Mapping SE chunk ${cid}"
-      map_se_mem_chunk "$sec" "$outbam"
+      map_se_mem_chunk "$sec" "$outbam" "mem.SE.${cid}"
     done
   fi
-
 else
-  # Ancient mapping: everything maps as SE (pooled SE contains merged/unpaired; PE trimmed pairs are not used directly)
-  se_chunks=( "$MAPCHUNKS/${SAMPLE}.SE_"*.fastq.gz )
+  # Ancient mapping: pooled SE is required (SE + merged + unpaired)
   [[ -s "$POOL_SE_ALL" ]] || die "Ancient mode requires pooled SE input (merged/unpaired/SE); got empty: $POOL_SE_ALL"
+  se_chunks=( "$MAPCHUNKS/${SAMPLE}.SE_"*.fastq.gz )
   [[ ${#se_chunks[@]} -gt 0 ]] || die "Expected SE mapchunks but found none"
   for sec in "${se_chunks[@]}"; do
     base=$(basename "$sec")
@@ -880,7 +818,7 @@ else
     cid="${cid%.fastq.gz}"
     outbam="$BAMS/${SAMPLE}.MAP.SE.${cid}.bam"
     log "  Mapping ancient SE chunk ${cid} (bwa aln)"
-    map_se_aln_chunk "$sec" "$outbam" "ancSE.${cid}"
+    map_se_aln_chunk "$sec" "$outbam" "aln.SE.${cid}"
   done
 fi
 
@@ -898,18 +836,10 @@ file_nonempty "$MERGED_BAM" || die "Merge failed: $MERGED_BAM"
 ###############################################################################
 # DEDUPLICATION (FLAG DUPLICATES, THEN FILTER)
 ###############################################################################
-# We avoid negative duplication rates by:
-# 1) Running markdup WITHOUT -r (duplicates are flagged, not removed)
-# 2) Computing fragment-level totals and duplicate fragments from the flags
-# 3) Creating a duplicate-removed BAM by filtering out flag 0x400
-
 MARKDUP_BAM="$FINAL/${SAMPLE}.markdup_flagged.bam"
 DEDUP_BAM="$FINAL/${SAMPLE}.dedup.bam"
 
-log "STEP: dedup (mark duplicates, fragment-safe)"
-# sort prerequisites:
-# - modern with any PE present: fixmate workflow
-# - otherwise: coordinate sort ok
+log "STEP: dedup (mark duplicates, then filter; duprate from duplicate flags)"
 
 if [[ "$LIBTYPE" == "modern" && "$SEQ_MODE" != "SE" ]]; then
   "$SAMTOOLS" sort -n -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.namesort.bam" "$MERGED_BAM"
@@ -920,12 +850,12 @@ else
   "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.coordsort.bam" "$MERGED_BAM"
 fi
 
-# markdup (flag only; no -r)
+# markdup (flag only; do NOT use -r)
 "$SAMTOOLS" markdup -s -@ "$SORT_THREADS" "$FINAL/${SAMPLE}.coordsort.bam" "$MARKDUP_BAM"
 rm -f "$FINAL/${SAMPLE}.coordsort.bam"
 file_nonempty "$MARKDUP_BAM" || die "markdup failed: $MARKDUP_BAM"
 
-# Create deduplicated BAM by filtering out duplicates (0x400)
+# Remove duplicates by filtering 0x400 then sort
 "$SAMTOOLS" view -b -F 1024 "$MARKDUP_BAM" > "$TMP/${SAMPLE}.nodup.unsorted.bam"
 "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$DEDUP_BAM" "$TMP/${SAMPLE}.nodup.unsorted.bam"
 rm -f "$TMP/${SAMPLE}.nodup.unsorted.bam"
@@ -959,58 +889,36 @@ fi
 log "STEP: coverage statistics"
 "$SAMTOOLS" coverage -q "$MAPQ" "$OUT_BAM" > "$COV_TSV"
 
+# samtools coverage columns (common):
+# 1 rname, 2 startpos, 3 endpos, 4 numreads, 5 covbases, 6 coverage(%), 7 meandepth, ...
+# Use ref_len = endpos - startpos + 1
 AVG_DEPTH=$(
-  awk 'BEGIN{sum=0;len=0}
+  awk 'BEGIN{wsum=0;len=0}
        NR==1{next}
-       {sum += $7*$6; len += $6}
-       END{if(len>0) printf "%.6f", sum/len; else print 0}' \
+       {ref_len=($3-$2+1); wsum += $7*ref_len; len += ref_len}
+       END{if(len>0) printf "%.6f", wsum/len; else print 0}' \
     "$COV_TSV"
 )
 
 PCT_COVERED=$(
-  awk 'BEGIN{sum=0;len=0}
-       NR==1{next}
-       {sum += $6*($6>0 ? $6/$6 : 1) * 0; }' "$COV_TSV" 2>/dev/null || true
-)
-# Better pct_covered: length-weighted mean of column 6 ("coverage" in %)
-PCT_COVERED=$(
-  awk 'BEGIN{sum=0;len=0}
-       NR==1{next}
-       {sum += $6 * $6; }' "$COV_TSV" 2>/dev/null || true
-)
-# Correct implementation:
-PCT_COVERED=$(
-  awk 'BEGIN{sum=0;len=0}
-       NR==1{next}
-       {sum += ($6 * $6); }' "$COV_TSV" 2>/dev/null || true
-)
-# The above got mangled; implement correctly now:
-PCT_COVERED=$(
   awk 'BEGIN{wsum=0;len=0}
        NR==1{next}
-       {wsum += $6*$6; len += $6}
+       {ref_len=($3-$2+1); wsum += $6*ref_len; len += ref_len}
        END{if(len>0) printf "%.6f", wsum/len; else print 0}' \
     "$COV_TSV"
 )
-# NOTE: samtools coverage column 6 is percent coverage (0-100). We want percent (0-100).
-# The formula above is length-weighted mean coverage%.
 
 ###############################################################################
 # SUMMARY STATS
 ###############################################################################
 log "STEP: summary statistics"
 
-# Read-level mapped counts (exclude secondary/supp/unmapped for "mapped reads")
+# Read-level mapped counts (exclude unmapped/secondary/supplementary)
 # -F 2308 filters: 4(unmapped)+256(secondary)+2048(supplementary)
 MAPPED_READS_ALL=$("$SAMTOOLS" view -c -F 2308 "$MERGED_BAM")
 MAPPED_READS_UNIQUE=$("$SAMTOOLS" view -c -F 2308 "$DEDUP_BAM")
 
-# Fragment-level mapped counts (consistent pre/post, using duplicate flags from MARKDUP_BAM)
-# Fragment definition:
-# - PE fragments counted by read1 among paired reads
-# - SE fragments counted by unpaired reads
-#
-# Total mapped fragments (pre-dedup): from MARKDUP_BAM (duplicates flagged, not removed)
+# Fragment-level mapped counts (from MARKDUP_BAM duplicate flags, fragment-consistent)
 MAPPED_FRAGMENTS_ALL=$("$SAMTOOLS" view -F 2308 "$MARKDUP_BAM" \
   | awk 'BEGIN{c=0}
          {flag=$2}
@@ -1018,16 +926,11 @@ MAPPED_FRAGMENTS_ALL=$("$SAMTOOLS" view -F 2308 "$MARKDUP_BAM" \
          {
            paired=hasbit(flag,1)
            read1=hasbit(flag,64)
-           if(paired){
-             if(read1) c++
-           } else {
-             c++
-           }
+           if(paired){ if(read1) c++ } else { c++ }
          }
          END{print c}'
 )
 
-# Duplicate mapped fragments: those with duplicate flag (0x400)
 DUP_FRAGMENTS=$("$SAMTOOLS" view -F 2308 "$MARKDUP_BAM" \
   | awk 'BEGIN{c=0}
          {flag=$2}
@@ -1037,17 +940,12 @@ DUP_FRAGMENTS=$("$SAMTOOLS" view -F 2308 "$MARKDUP_BAM" \
            paired=hasbit(flag,1)
            read1=hasbit(flag,64)
            if(dup){
-             if(paired){
-               if(read1) c++
-             } else {
-               c++
-             }
+             if(paired){ if(read1) c++ } else { c++ }
            }
          }
          END{print c}'
 )
 
-# Unique mapped fragments (post-dedup): total - duplicate
 MAPPED_FRAGMENTS_UNIQUE=$("$PYTHON" - "$MAPPED_FRAGMENTS_ALL" "$DUP_FRAGMENTS" <<'PY'
 import sys
 a=int(sys.argv[1]); d=int(sys.argv[2])
@@ -1056,7 +954,6 @@ print(u if u>=0 else 0)
 PY
 )
 
-# Duplication rate in fragment-space
 DUPRATE=$("$PYTHON" - "$DUP_FRAGMENTS" "$MAPPED_FRAGMENTS_ALL" <<'PY'
 import sys
 d=float(sys.argv[1]); a=float(sys.argv[2])
@@ -1064,7 +961,6 @@ print("0.000000" if a<=0 else f"{(d/a):.6f}")
 PY
 )
 
-# Avg read length from dedup BAM (mapped only)
 AVG_READLEN=$(
   "$SAMTOOLS" view -F 2308 "$DEDUP_BAM" \
   | awk '{l=length($10); if(l>0){sum+=l;n++}} END{ if(n>0) printf "%.2f", sum/n; else printf "0.00"}'
@@ -1077,9 +973,9 @@ RATIO_TRIM=$(ratio "$TRIMMED_FRAGMENTS" "$RAW_FRAGMENTS")
 ENDOG=$(ratio "$MAPPED_FRAGMENTS_UNIQUE" "$RAW_FRAGMENTS")
 
 {
-  printf "sample\tlibrary_type\tseq_mode\tpilot_fragments\tmax_reads_per_chunk\traw_R1_reads\traw_R2_reads\traw_fragments\ttrimmed_fragments\tmerged_reads\tunpaired_reads\tpct_fragments_remaining\ttrimmed_over_raw\tmapped_reads_all\tmapped_reads_unique\tmapped_fragments_all\tmapped_fragments_unique\tendog\tduprate\tavg_readlen\tmapped_bp\tavg_depth\tpct_covered\n"
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-    "$SAMPLE" "$LIBTYPE" "$SEQ_MODE" "$PILOT_FRAGMENTS" "$MAX_READS_PER_CHUNK" \
+  printf "sample\tlibrary_type\tseq_mode\tpilot_fragments\tmax_reads_per_chunk\tmapq\traw_R1_reads\traw_R2_reads\traw_fragments\ttrimmed_fragments\tmerged_reads\tunpaired_reads\tpct_fragments_remaining\ttrimmed_over_raw\tmapped_reads_all\tmapped_reads_unique\tmapped_fragments_all\tmapped_fragments_unique\tendog\tduprate\tavg_readlen\tmapped_bp\tavg_depth\tpct_covered\n"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$SAMPLE" "$LIBTYPE" "$SEQ_MODE" "$PILOT_FRAGMENTS" "$MAX_READS_PER_CHUNK" "$MAPQ" \
     "$RAW_R1_READS" "$RAW_R2_READS" "$RAW_FRAGMENTS" \
     "$TRIMMED_FRAGMENTS" "$MERGED_READS" "$UNPAIRED_READS" \
     "$PCT_REMAIN" "$RATIO_TRIM" \
