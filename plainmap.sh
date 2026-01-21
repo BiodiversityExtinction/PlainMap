@@ -402,6 +402,11 @@ classify_fastq_direction() {
   if [[ "$firsttok" == */1 ]]; then echo "R1"; return; fi
   if [[ "$firsttok" == */2 ]]; then echo "R2"; return; fi
 
+  # SRA style: first token ends with .1 or .2
+  if [[ "$firsttok" == *.1 ]]; then echo "R1"; return; fi
+  if [[ "$firsttok" == *.2 ]]; then echo "R2"; return; fi
+
+
   echo "UNKNOWN"
 }
 
