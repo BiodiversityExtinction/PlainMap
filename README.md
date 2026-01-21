@@ -87,6 +87,7 @@ PlainMap inspects the first header line in each FASTQ and classifies read direct
 
 - Illumina/DNBSEQ/CASAVA style: header contains ` 1:` (R1) or ` 2:` (R2)
 - ENA style: header token ends with `/1` (R1) or `/2` (R2)
+- SRA style: header token ends with `.1` (R1) or `.2` (R2)
 
 PlainMap supports **mixed SE + PE** datasets in the same manifest.
 
