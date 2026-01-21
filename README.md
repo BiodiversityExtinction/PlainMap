@@ -85,7 +85,7 @@ Example:
 
 PlainMap inspects the first header line in each FASTQ and classifies read direction as:
 
-- Illumina/CASAVA style: header contains ` 1:` (R1) or ` 2:` (R2)
+- Illumina/DNBSEQ/CASAVA style: header contains ` 1:` (R1) or ` 2:` (R2)
 - ENA style: header token ends with `/1` (R1) or `/2` (R2)
 
 PlainMap supports **mixed SE + PE** datasets in the same manifest.
@@ -315,6 +315,9 @@ All statistics are **fragment-aware**, meaning paired-end reads are counted as a
 - **max_reads_per_chunk**  
   Maximum reads per chunk used for adaptive pre-fastp chunking.  
   A value of `0` indicates chunking is disabled.
+
+- **mapq**  
+  Minimum mapping quality threshold applied during BAM generation.
 
 ---
 
