@@ -426,7 +426,6 @@ All statistics are **fragment-aware**, meaning paired-end reads are counted as a
 - No QC plotting
 - No contamination estimation
 - No variant calling
-- MAPQ threshold is currently fixed in the script (default 20)
 
 ---
 
