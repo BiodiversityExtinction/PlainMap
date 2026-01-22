@@ -50,6 +50,9 @@ ADAPTER_R1=""
 ADAPTER_R2=""
 TRIM_ONLY=0
 
+# mapDamage toggle (default OFF for all library types)
+RUN_MAPDAMAGE=0
+
 DRYRUN=0
 VALIDATE_ONLY=0
 RESUME=1
@@ -87,6 +90,8 @@ Optional:
   --adapter-r1 SEQ
   --adapter-r2 SEQ
   --trim-only                                Trim only (fastp); exit before mapping
+  --run-mapdamage                            Run mapDamage (any library type; default OFF)
+  --no-mapdamage                             Do not run mapDamage (default)
   --tmpdir DIR                               Custom temp dir (e.g. node-local scratch)
   --keep-intermediate                        Keep <outdir>/<prefix>/work
   --resume | --no-resume
@@ -128,6 +133,8 @@ while [[ $# -gt 0 ]]; do
     --adapter-r1) ADAPTER_R1="$2"; shift 2 ;;
     --adapter-r2) ADAPTER_R2="$2"; shift 2 ;;
     --trim-only) TRIM_ONLY=1; shift ;;
+    --run-mapdamage) RUN_MAPDAMAGE=1; shift ;;
+    --no-mapdamage) RUN_MAPDAMAGE=0; shift ;;
     --tmpdir) TMPDIR_USER="$2"; shift 2 ;;
     --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
     --resume) RESUME=1; shift ;;
@@ -268,7 +275,10 @@ quick_preflight() {
     require_cmd gzip
     require_cmd zcat
   fi
-  [[ "$LIBTYPE" != "ancient" ]] || require_cmd "$MAPDAMAGE"
+  # Require mapDamage only if it will run (any library type)
+  if [[ "$RUN_MAPDAMAGE" -eq 1 ]]; then
+    require_cmd "$MAPDAMAGE"
+  fi
 }
 
 ###############################################################################
@@ -306,11 +316,16 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  mapq:                $MAPQ"
   log "  pilot_fragments:     $PILOT_FRAGMENTS (PER-UNIT cap)"
   log "  max_reads_per_chunk: $MAX_READS_PER_CHUNK"
-  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> pool (SE-like vs unmerged PE) -> map (chunked optional) -> dedup -> RG -> coverage -> stats"
+  log "  run_mapdamage:       $RUN_MAPDAMAGE (any library type)"
+  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> pool (SE-like vs unmerged PE) -> map (chunked optional) -> dedup -> RG -> (mapDamage optional) -> coverage -> stats"
   exit 0
 fi
 
 quick_preflight
+
+# ---------------------------------------------------------------------------
+# From here down: identical to your working script EXCEPT the mapDamage block.
+# ---------------------------------------------------------------------------
 
 ###############################################################################
 # BWA INDEX (PARALLEL SAFE)
@@ -365,7 +380,6 @@ FASTP_ARGS=( -l "$MINLEN" -g -w "$THREADS" )
 # JSON HELPERS (robust across fastp schemas)
 ###############################################################################
 json_get_int_any() {
-  # usage: json_get_int_any <json> <key1> <key2> ...
   "$PYTHON" - "$@" <<'PY'
 import json,sys
 path=sys.argv[1]
@@ -437,10 +451,6 @@ first_header_line() {
 }
 
 normalize_qname() {
-  # normalize a FASTQ header line into a "mate key":
-  # - take first token
-  # - strip leading @
-  # - strip trailing /1 or /2 if present
   local hdr="$1"
   local first="${hdr%% *}"
   first="${first#@}"
@@ -450,30 +460,24 @@ normalize_qname() {
 }
 
 classify_fastq_direction() {
-  # prints: R1 | R2 | UNKNOWN
   local fq="$1"
   local hdr firsttok rest secondtok
   hdr="$(first_header_line "$fq")"
   [[ -n "$hdr" ]] || { echo "UNKNOWN"; return; }
 
-  # Illumina/CASAVA token " 1:" / " 2:"
   if [[ "$hdr" == *" 1:"* ]]; then echo "R1"; return; fi
   if [[ "$hdr" == *" 2:"* ]]; then echo "R2"; return; fi
 
-  # Tokenize
   firsttok="${hdr%% *}"
   rest="${hdr#"$firsttok"}"; rest="${rest# }"
   secondtok="${rest%% *}"
 
-  # Mate marker sometimes appears on token2
   if [[ "$secondtok" == */1 ]]; then echo "R1"; return; fi
   if [[ "$secondtok" == */2 ]]; then echo "R2"; return; fi
 
-  # ENA/older Illumina style: token1 ends with /1 or /2
   if [[ "$firsttok" == */1 ]]; then echo "R1"; return; fi
   if [[ "$firsttok" == */2 ]]; then echo "R2"; return; fi
 
-  # SRA-style (occasionally): token2 is literally "1" or "2"
   if [[ "$secondtok" == "1" ]]; then echo "R1"; return; fi
   if [[ "$secondtok" == "2" ]]; then echo "R2"; return; fi
 
@@ -481,7 +485,6 @@ classify_fastq_direction() {
 }
 
 check_headers_identical_sra() {
-  # Compare normalized qname roots (strips /1,/2)
   local f1="$1" f2="$2"
   local h1 h2 k1 k2
   h1="$(first_header_line "$f1")"
@@ -498,7 +501,7 @@ $f2 -> $k2"
 ###############################################################################
 declare -A R1_BY_KEY
 declare -A R2_BY_KEY
-declare -A UNK_BY_KEY        # newline-separated "idx:path" entries
+declare -A UNK_BY_KEY
 declare -A DIR_BY_PATH
 declare -A HDR_BY_PATH
 
@@ -707,22 +710,17 @@ TRIMMED_FRAGMENTS=0
 MERGED_READS=0
 UNPAIRED_READS=0
 
-# Per-unit pilot budget tracking (unit_id -> remaining reads/pairs)
 declare -A PILOT_LEFT_BY_UNIT
 
 log "STEP: fastp per unit-chunk (JSON only) + pooling (unmerged PE separate from SE-like)"
 shopt -s nullglob
 
-# ---------------------------
-# Process PE unit-chunks
-# ---------------------------
 pe_r1_chunks=( "$CHUNKS/${SAMPLE}.PE"*".R1_"*.fastq.gz )
 for r1c in "${pe_r1_chunks[@]}"; do
   base=$(basename "$r1c")
   r2c="${r1c/.R1_/.R2_}"
   [[ -f "$r2c" ]] || die "Missing PE mate chunk for: $r1c (expected $r2c)"
 
-  # unit_id groups all chunks for the same pre-fastp unit (e.g. SAMPLE.PE0000)
   unit_id="${base%.fastq.gz}"
   unit_id="${unit_id%%.R1_*}"
 
@@ -731,7 +729,6 @@ for r1c in "${pe_r1_chunks[@]}"; do
   fi
   unit_left="${PILOT_LEFT_BY_UNIT[$unit_id]:-0}"
 
-  # If this unit already exhausted, skip remaining chunks of this unit
   if [[ "$PILOT_FRAGMENTS" -gt 0 && "$unit_left" -le 0 ]]; then
     continue
   fi
@@ -792,16 +789,13 @@ for r1c in "${pe_r1_chunks[@]}"; do
   file_nonempty "$trim1" || die "fastp produced empty trimmed R1 for $tag"
   file_nonempty "$trim2" || die "fastp produced empty trimmed R2 for $tag"
 
-  # Pool: keep unmerged PE separate
   cat "$trim1" >> "$POOL_PE_R1"
   cat "$trim2" >> "$POOL_PE_R2"
 
-  # Pool: merged + unpaired become SE-like
   file_nonempty "$merged" && cat "$merged" >> "$POOL_SE_ALL"
   file_nonempty "$up1"   && cat "$up1"   >> "$POOL_SE_ALL"
   file_nonempty "$up2"   && cat "$up2"   >> "$POOL_SE_ALL"
 
-  # Stats from JSON + fallbacks
   out1_reads=$(json_get_int_any "$fp_json" "read1_after_filtering.total_reads")
   [[ "$out1_reads" -le 0 ]] && out1_reads=$(count_reads_fastq_gz "$trim1")
   TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$out1_reads")
@@ -827,14 +821,10 @@ for r1c in "${pe_r1_chunks[@]}"; do
   fi
 done
 
-# ---------------------------
-# Process SE unit-chunks
-# ---------------------------
 se_chunks=( "$CHUNKS/${SAMPLE}.SE"*".SE_"*.fastq.gz )
 for sec in "${se_chunks[@]}"; do
   base=$(basename "$sec")
 
-  # unit_id groups all chunks for the same SE unit (e.g. SAMPLE.SE0000)
   unit_id="${base%.fastq.gz}"
   unit_id="${unit_id%%.SE_*}"
 
@@ -917,7 +907,6 @@ fi
 
 ###############################################################################
 # POST-FASTP MAPPING CHUNKING (OPTIONAL; REUSE MAX_READS_PER_CHUNK)
-# CRITICAL: PE pools must remain synchronized for sampe; we enforce this.
 ###############################################################################
 rm -f "$MAPCHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
 
@@ -1016,7 +1005,6 @@ map_pe_aln_chunk() {
   rm -f "$TMP/${SAMPLE}.${tag}.1.sai" "$TMP/${SAMPLE}.${tag}.2.sai" "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
 }
 
-# Map unmerged PE (if any)
 if [[ -s "$POOL_PE_R1" && -s "$POOL_PE_R2" ]]; then
   pe_r1_chunks=( "$MAPCHUNKS/${SAMPLE}.PE.R1_"*.fastq.gz )
   [[ ${#pe_r1_chunks[@]} -gt 0 ]] || die "Expected PE mapchunks but found none"
@@ -1040,7 +1028,6 @@ if [[ -s "$POOL_PE_R1" && -s "$POOL_PE_R2" ]]; then
   done
 fi
 
-# Map SE-like pool (merged + unpaired + SE)
 if [[ -s "$POOL_SE_ALL" ]]; then
   se_chunks=( "$MAPCHUNKS/${SAMPLE}.SE_"*.fastq.gz )
   [[ ${#se_chunks[@]} -gt 0 ]] || die "Expected SE mapchunks but found none"
@@ -1114,7 +1101,8 @@ RG="@RG\tID:${SAMPLE}\tSM:${SAMPLE}\tPL:illumina\tLB:${SAMPLE}"
 "$SAMTOOLS" index "$OUT_BAM"
 file_nonempty "$OUT_BAM" || die "RG BAM missing/empty"
 
-if [[ "$LIBTYPE" == "ancient" ]]; then
+# NEW: mapDamage runs only if explicitly requested (any library type)
+if [[ "$RUN_MAPDAMAGE" -eq 1 ]]; then
   log "STEP: mapDamage"
   "$MAPDAMAGE" -i "$OUT_BAM" --merge-reference-sequences --no-stats -r "$REF" -d "$OUT/${SAMPLE}_mapdamage"
 fi
