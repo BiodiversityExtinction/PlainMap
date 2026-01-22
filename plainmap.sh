@@ -6,7 +6,7 @@
 # - Manifest can contain mixed SE + PE, mixed platforms, mixed naming conventions
 # - SE/PE classification is derived from FASTQ headers:
 #     * Illumina/CASAVA: header contains ' 1:' / ' 2:'
-#     * ENA/older Illumina: first token ends with /1 or /2
+#     * ENA/older Illumina: token1 or token2 ends with /1 or /2
 #     * SRA-export FASTQ (often lacks mate markers): R1/R2 headers are identical;
 #       PlainMap pairs files by identical normalized first-read name (key) and
 #       assigns mates deterministically by manifest order (first=R1, second=R2),
@@ -43,7 +43,7 @@ MINLEN=30
 MISMATCH=0.01              # bwa aln -n (ancient/historical)
 LIBTYPE="modern"           # modern|ancient|historical
 MAX_READS_PER_CHUNK=0      # 0 disables pre-fastp chunking safety valve
-PILOT_FRAGMENTS=0          # 0 disables pilot; otherwise GLOBAL cap on fragments BEFORE fastp
+PILOT_FRAGMENTS=0          # 0 disables pilot; otherwise PER-UNIT cap on fragments BEFORE fastp
 MAPQ=20                    # mapping quality threshold (samtools view -q)
 
 ADAPTER_R1=""
@@ -83,7 +83,7 @@ Optional:
   --mismatch FLOAT                           (ancient/historical; bwa aln -n; default: 0.01)
   --mapq INT                                 Mapping quality threshold (default: 20)
   --max-reads-per-chunk INT                  (default: 0; disabled) pre-fastp chunking safety valve
-  --pilot-fragments INT                      (default: 0; disabled) GLOBAL cap on fragments before fastp
+  --pilot-fragments INT                      (default: 0; disabled) PER-UNIT cap on fragments before fastp
   --adapter-r1 SEQ
   --adapter-r2 SEQ
   --trim-only                                Trim only (fastp); exit before mapping
@@ -304,9 +304,9 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  minlength:           $MINLEN"
   log "  mismatch (aln):      $MISMATCH"
   log "  mapq:                $MAPQ"
-  log "  pilot_fragments:     $PILOT_FRAGMENTS (GLOBAL cap)"
+  log "  pilot_fragments:     $PILOT_FRAGMENTS (PER-UNIT cap)"
   log "  max_reads_per_chunk: $MAX_READS_PER_CHUNK"
-  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot (optional) -> fastp -> pool (SE-like vs unmerged PE) -> map (chunked optional) -> dedup -> RG -> coverage -> stats"
+  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> pool (SE-like vs unmerged PE) -> map (chunked optional) -> dedup -> RG -> coverage -> stats"
   exit 0
 fi
 
@@ -465,7 +465,7 @@ classify_fastq_direction() {
   rest="${hdr#"$firsttok"}"; rest="${rest# }"
   secondtok="${rest%% *}"
 
-  # Mate marker sometimes appears on token2 (common in many public FASTQs)
+  # Mate marker sometimes appears on token2
   if [[ "$secondtok" == */1 ]]; then echo "R1"; return; fi
   if [[ "$secondtok" == */2 ]]; then echo "R2"; return; fi
 
@@ -481,7 +481,7 @@ classify_fastq_direction() {
 }
 
 check_headers_identical_sra() {
-  # Compare normalized qname roots (strips /1,/2 and keeps stable part)
+  # Compare normalized qname roots (strips /1,/2)
   local f1="$1" f2="$2"
   local h1 h2 k1 k2
   h1="$(first_header_line "$f1")"
@@ -494,7 +494,7 @@ $f2 -> $k2"
 }
 
 ###############################################################################
-# BUILD UNITS SAFELY (NO ZIP-BY-INDEX ACROSS DIFFERENT KEYS; SRA UNKNOWN handled)
+# BUILD UNITS SAFELY (SRA unknown handled)
 ###############################################################################
 declare -A R1_BY_KEY
 declare -A R2_BY_KEY
@@ -533,7 +533,6 @@ while read -r f; do
     [[ -z "${R2_BY_KEY[$key]:-}" ]] || die "Multiple R2 files share the same first-read key '$key' (unexpected). Offending: $f and ${R2_BY_KEY[$key]}"
     R2_BY_KEY["$key"]="$f"
   else
-    # UNKNOWN: store with manifest order index to deterministically assign mates later
     if [[ -z "${UNK_BY_KEY[$key]:-}" ]]; then
       UNK_BY_KEY["$key"]="${IDX}:${f}"
     else
@@ -547,12 +546,10 @@ done < "$MANIFEST"
 PE_KEYS=()
 SE_FILES=()
 
-# 1) If we have explicit R2 without R1 for a key, error (safer than guessing)
 for k in "${!R2_BY_KEY[@]}"; do
   [[ -n "${R1_BY_KEY[$k]:-}" ]] || die "Found R2 without matching R1 for key '$k' (check manifest): ${R2_BY_KEY[$k]}"
 done
 
-# 2) Explicitly marked R1 keys: either PE (if matching R2) or SE
 for k in "${!R1_BY_KEY[@]}"; do
   if [[ -n "${R2_BY_KEY[$k]:-}" ]]; then
     PE_KEYS+=( "$k" )
@@ -561,16 +558,12 @@ for k in "${!R1_BY_KEY[@]}"; do
   fi
 done
 
-# 3) UNKNOWN keys: if exactly 1 file -> SE; if exactly 2 -> SRA-style PE; else error
 for k in "${!UNK_BY_KEY[@]}"; do
   mapfile -t entries <<< "${UNK_BY_KEY[$k]}"
   if [[ "${#entries[@]}" -eq 1 ]]; then
-    # single unknown file => treat as SE
     f="${entries[0]#*:}"
     SE_FILES+=( "$f" )
   elif [[ "${#entries[@]}" -eq 2 ]]; then
-    # two unknown files => treat as SRA-style PE; assign by manifest order
-    # sort by idx (small, so simple compare)
     e1="${entries[0]}"; e2="${entries[1]}"
     i1="${e1%%:*}"; f1="${e1#*:}"
     i2="${e2%%:*}"; f2="${e2#*:}"
@@ -580,7 +573,6 @@ for k in "${!UNK_BY_KEY[@]}"; do
       i2="$tmpi"; f2="$tmpf"
     fi
 
-    # sanity: headers should match (SRA-style), and read counts should match
     check_headers_identical_sra "$f1" "$f2"
     n1=$(count_reads_fastq_gz "$f1")
     n2=$(count_reads_fastq_gz "$f2")
@@ -588,7 +580,6 @@ for k in "${!UNK_BY_KEY[@]}"; do
 $f1
 $f2"
 
-    # Assign R1/R2 deterministically (manifest order); store as explicit R1/R2 for downstream
     [[ -z "${R1_BY_KEY[$k]:-}" && -z "${R2_BY_KEY[$k]:-}" ]] || die "Internal error: UNKNOWN key '$k' already classified"
     R1_BY_KEY["$k"]="$f1"
     R2_BY_KEY["$k"]="$f2"
@@ -598,7 +589,6 @@ $f2"
   fi
 done
 
-# Determine seq_mode summary
 SEQ_MODE="SE"
 if [[ ${#PE_KEYS[@]} -gt 0 && ${#SE_FILES[@]} -gt 0 ]]; then
   SEQ_MODE="MIX"
@@ -649,7 +639,6 @@ make_chunks() {
   ckpt_clear chunk
   rm -f "$CHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
 
-  # PE units: one R1 and one R2 per key
   local idx=0
   for k in "${PE_KEYS[@]}"; do
     local r1="${R1_BY_KEY[$k]}"
@@ -674,7 +663,6 @@ make_chunks() {
     idx=$((idx+1))
   done
 
-  # SE units: each file independent
   local sidx=0
   for fq in "${SE_FILES[@]}"; do
     local unit="SE$(printf '%04d' $sidx)"
@@ -701,8 +689,7 @@ fi
 
 ###############################################################################
 # FASTP PER PRE-FASTP CHUNK -> POOL TRIMMED OUTPUTS
-# - unmerged PE kept separate
-# - SE-like (merged + unpaired + SE) pooled together
+# Pilot behaviour: PER-UNIT cap before fastp.
 ###############################################################################
 POOL_PE_R1="$RAW/${SAMPLE}.pool.PE.R1.fastq.gz"
 POOL_PE_R2="$RAW/${SAMPLE}.pool.PE.R2.fastq.gz"
@@ -720,19 +707,34 @@ TRIMMED_FRAGMENTS=0
 MERGED_READS=0
 UNPAIRED_READS=0
 
-PILOT_LEFT="$PILOT_FRAGMENTS"
+# Per-unit pilot budget tracking (unit_id -> remaining reads/pairs)
+declare -A PILOT_LEFT_BY_UNIT
 
 log "STEP: fastp per unit-chunk (JSON only) + pooling (unmerged PE separate from SE-like)"
 shopt -s nullglob
 
+# ---------------------------
 # Process PE unit-chunks
+# ---------------------------
 pe_r1_chunks=( "$CHUNKS/${SAMPLE}.PE"*".R1_"*.fastq.gz )
 for r1c in "${pe_r1_chunks[@]}"; do
-  [[ "$PILOT_FRAGMENTS" -gt 0 && "$PILOT_LEFT" -le 0 ]] && break
-
   base=$(basename "$r1c")
   r2c="${r1c/.R1_/.R2_}"
   [[ -f "$r2c" ]] || die "Missing PE mate chunk for: $r1c (expected $r2c)"
+
+  # unit_id groups all chunks for the same pre-fastp unit (e.g. SAMPLE.PE0000)
+  unit_id="${base%.fastq.gz}"
+  unit_id="${unit_id%%.R1_*}"
+
+  if [[ "$PILOT_FRAGMENTS" -gt 0 && -z "${PILOT_LEFT_BY_UNIT[$unit_id]:-}" ]]; then
+    PILOT_LEFT_BY_UNIT["$unit_id"]="$PILOT_FRAGMENTS"
+  fi
+  unit_left="${PILOT_LEFT_BY_UNIT[$unit_id]:-0}"
+
+  # If this unit already exhausted, skip remaining chunks of this unit
+  if [[ "$PILOT_FRAGMENTS" -gt 0 && "$unit_left" -le 0 ]]; then
+    continue
+  fi
 
   in_r1="$r1c"
   in_r2="$r2c"
@@ -741,10 +743,13 @@ for r1c in "${pe_r1_chunks[@]}"; do
   take_pairs="$pairs_in_chunk"
 
   if [[ "$PILOT_FRAGMENTS" -gt 0 ]]; then
-    take_pairs=$(pilot_take "$pairs_in_chunk" "$PILOT_LEFT")
-    [[ "$take_pairs" -le 0 ]] && break
+    take_pairs=$(pilot_take "$pairs_in_chunk" "$unit_left")
+    if [[ "$take_pairs" -le 0 ]]; then
+      PILOT_LEFT_BY_UNIT["$unit_id"]=0
+      continue
+    fi
     if [[ "$take_pairs" -lt "$pairs_in_chunk" ]]; then
-      log "  Pilot: limiting PE chunk $(basename "$r1c") to first $take_pairs pairs (global remaining before: $PILOT_LEFT)"
+      log "  Pilot (per-unit): limiting PE unit $unit_id chunk $(basename "$r1c") to first $take_pairs pairs (unit remaining before: $unit_left)"
     fi
     lim_r1="$TMP/${SAMPLE}.$(basename "${r1c%.fastq.gz}").pilot.R1.fastq.gz"
     lim_r2="$TMP/${SAMPLE}.$(basename "${r2c%.fastq.gz}").pilot.R2.fastq.gz"
@@ -752,7 +757,8 @@ for r1c in "${pe_r1_chunks[@]}"; do
     limit_fastq_gz "$in_r2" "$lim_r2" "$take_pairs"
     in_r1="$lim_r1"
     in_r2="$lim_r2"
-    PILOT_LEFT="$(py_sub_nonneg "$PILOT_LEFT" "$take_pairs")"
+    unit_left="$(py_sub_nonneg "$unit_left" "$take_pairs")"
+    PILOT_LEFT_BY_UNIT["$unit_id"]="$unit_left"
   fi
 
   RAW_R1_READS=$(py_add "$RAW_R1_READS" "$take_pairs")
@@ -786,13 +792,16 @@ for r1c in "${pe_r1_chunks[@]}"; do
   file_nonempty "$trim1" || die "fastp produced empty trimmed R1 for $tag"
   file_nonempty "$trim2" || die "fastp produced empty trimmed R2 for $tag"
 
+  # Pool: keep unmerged PE separate
   cat "$trim1" >> "$POOL_PE_R1"
   cat "$trim2" >> "$POOL_PE_R2"
 
+  # Pool: merged + unpaired become SE-like
   file_nonempty "$merged" && cat "$merged" >> "$POOL_SE_ALL"
   file_nonempty "$up1"   && cat "$up1"   >> "$POOL_SE_ALL"
   file_nonempty "$up2"   && cat "$up2"   >> "$POOL_SE_ALL"
 
+  # Stats from JSON + fallbacks
   out1_reads=$(json_get_int_any "$fp_json" "read1_after_filtering.total_reads")
   [[ "$out1_reads" -le 0 ]] && out1_reads=$(count_reads_fastq_gz "$trim1")
   TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$out1_reads")
@@ -813,28 +822,49 @@ for r1c in "${pe_r1_chunks[@]}"; do
   TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$up2n")
 
   rm -f "$trim1" "$trim2" "$merged" "$up1" "$up2" 2>/dev/null || true
-  [[ "$PILOT_FRAGMENTS" -gt 0 ]] && rm -f "$lim_r1" "$lim_r2" 2>/dev/null || true
+  if [[ "$PILOT_FRAGMENTS" -gt 0 ]]; then
+    rm -f "${lim_r1:-}" "${lim_r2:-}" 2>/dev/null || true
+  fi
 done
 
+# ---------------------------
 # Process SE unit-chunks
+# ---------------------------
 se_chunks=( "$CHUNKS/${SAMPLE}.SE"*".SE_"*.fastq.gz )
 for sec in "${se_chunks[@]}"; do
-  [[ "$PILOT_FRAGMENTS" -gt 0 && "$PILOT_LEFT" -le 0 ]] && break
+  base=$(basename "$sec")
+
+  # unit_id groups all chunks for the same SE unit (e.g. SAMPLE.SE0000)
+  unit_id="${base%.fastq.gz}"
+  unit_id="${unit_id%%.SE_*}"
+
+  if [[ "$PILOT_FRAGMENTS" -gt 0 && -z "${PILOT_LEFT_BY_UNIT[$unit_id]:-}" ]]; then
+    PILOT_LEFT_BY_UNIT["$unit_id"]="$PILOT_FRAGMENTS"
+  fi
+  unit_left="${PILOT_LEFT_BY_UNIT[$unit_id]:-0}"
+
+  if [[ "$PILOT_FRAGMENTS" -gt 0 && "$unit_left" -le 0 ]]; then
+    continue
+  fi
 
   in_se="$sec"
   reads_in_chunk=$(count_reads_fastq_gz "$in_se")
   take_reads="$reads_in_chunk"
 
   if [[ "$PILOT_FRAGMENTS" -gt 0 ]]; then
-    take_reads=$(pilot_take "$reads_in_chunk" "$PILOT_LEFT")
-    [[ "$take_reads" -le 0 ]] && break
+    take_reads=$(pilot_take "$reads_in_chunk" "$unit_left")
+    if [[ "$take_reads" -le 0 ]]; then
+      PILOT_LEFT_BY_UNIT["$unit_id"]=0
+      continue
+    fi
     if [[ "$take_reads" -lt "$reads_in_chunk" ]]; then
-      log "  Pilot: limiting SE chunk $(basename "$sec") to first $take_reads reads (global remaining before: $PILOT_LEFT)"
+      log "  Pilot (per-unit): limiting SE unit $unit_id chunk $(basename "$sec") to first $take_reads reads (unit remaining before: $unit_left)"
     fi
     lim_se="$TMP/${SAMPLE}.$(basename "${sec%.fastq.gz}").pilot.SE.fastq.gz"
     limit_fastq_gz "$in_se" "$lim_se" "$take_reads"
     in_se="$lim_se"
-    PILOT_LEFT="$(py_sub_nonneg "$PILOT_LEFT" "$take_reads")"
+    unit_left="$(py_sub_nonneg "$unit_left" "$take_reads")"
+    PILOT_LEFT_BY_UNIT["$unit_id"]="$unit_left"
   fi
 
   RAW_R1_READS=$(py_add "$RAW_R1_READS" "$take_reads")
@@ -860,7 +890,9 @@ for sec in "${se_chunks[@]}"; do
   TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$se_after")
 
   rm -f "$trim_se" 2>/dev/null || true
-  [[ "$PILOT_FRAGMENTS" -gt 0 ]] && rm -f "$lim_se" 2>/dev/null || true
+  if [[ "$PILOT_FRAGMENTS" -gt 0 ]]; then
+    rm -f "${lim_se:-}" 2>/dev/null || true
+  fi
 done
 
 ###############################################################################
