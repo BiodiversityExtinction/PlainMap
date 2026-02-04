@@ -1172,11 +1172,16 @@ PY
 )
 
 AVG_READLEN=$(
-  "$SAMTOOLS" view -F 2308 "$DEDUP_BAM" \
+  "$SAMTOOLS" view -F 2308 "$OUT_BAM" \
   | awk '{l=length($10); if(l>0){sum+=l;n++}} END{ if(n>0) printf "%.2f", sum/n; else printf "0.00"}'
 )
 
-MAPPED_BP=$(awk -v n="$MAPPED_READS_ALL" -v l="$AVG_READLEN" 'BEGIN{printf "%.0f", n*l}')
+# Exact mapped bp (sum of read lengths for mapped reads; read-level, not fragment-level)
+MAPPED_BP=$(
+  "$SAMTOOLS" view -F 2308 "$OUT_BAM" \
+  | awk '{l=length($10); if(l>0){sum+=l}} END{printf "%.0f", sum+0}'
+)
+
 
 ENDOG=$("$PYTHON" - "$MAPPED_FRAGMENTS_UNIQUE" "$RAW_FRAGMENTS" <<'PY'
 import sys
