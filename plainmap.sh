@@ -23,6 +23,13 @@
 #   ancient    : bwa aln/samse; maps SE-like only (merged + unpaired + SE)
 #   historical : bwa aln; maps unmerged PE with aln+sampe AND SE-like with aln+samse
 #
+# Resume / restartability notes (implemented):
+# - Pre-fastp chunking has a checkpoint
+# - Mapping is chunk-resumable: existing per-chunk BAMs are preserved and skipped when --resume (default ON)
+# - Mapchunk FASTQs are preserved and reused when --resume and already present
+# - samtools merge uses -f to overwrite partial outputs if merge died mid-write
+# - mapped_bp computed exactly by summing SEQ lengths from samtools view (on final RG BAM)
+
 set -euo pipefail
 
 ###############################################################################
@@ -275,7 +282,6 @@ quick_preflight() {
     require_cmd gzip
     require_cmd zcat
   fi
-  # Require mapDamage only if it will run (any library type)
   if [[ "$RUN_MAPDAMAGE" -eq 1 ]]; then
     require_cmd "$MAPDAMAGE"
   fi
@@ -317,18 +323,15 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  pilot_fragments:     $PILOT_FRAGMENTS (PER-UNIT cap)"
   log "  max_reads_per_chunk: $MAX_READS_PER_CHUNK"
   log "  run_mapdamage:       $RUN_MAPDAMAGE (any library type)"
+  log "  resume:              $RESUME"
   log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> pool (SE-like vs unmerged PE) -> map (chunked optional) -> dedup -> RG -> (mapDamage optional) -> coverage -> stats"
   exit 0
 fi
 
 quick_preflight
 
-# ---------------------------------------------------------------------------
-# From here down: identical to your working script EXCEPT the mapDamage block.
-# ---------------------------------------------------------------------------
-
 ###############################################################################
-# BWA INDEX (PARALLEL SAFE)
+# BWA INDEX (PARALLEL SAFE + STALE LOCK PROTECTION)
 ###############################################################################
 ensure_bwa_index() {
   local ref="$1"
@@ -344,13 +347,29 @@ ensure_bwa_index() {
     "$BWA" index "$ref"
     rm -rf "$lock"; trap - EXIT
   else
-    log "Waiting for BWA index to finish"
-    while :; do
+    log "Waiting for BWA index to finish (lock exists: $lock)"
+
+    # Stale lock guard: if lock is very old and no index files are appearing, fail with instructions.
+    local lock_mtime=0
+    lock_mtime=$(stat -c %Y "$lock" 2>/dev/null || echo 0)
+    local now
+    now=$(date +%s)
+    local age=$(( now - lock_mtime ))
+    if [[ "$lock_mtime" -gt 0 && "$age" -gt 7200 ]]; then
+      die "BWA index lock appears stale (>2h): $lock. If no other job is indexing, remove it: rm -rf '$lock'"
+    fi
+
+    # Wait up to 2 hours (720 * 10s)
+    for _i in {1..720}; do
       sleep 10
       missing=0
       for f in "${idx[@]}"; do [[ -f "$f" ]] || missing=1; done
       [[ "$missing" -eq 0 ]] && break
     done
+
+    missing=0
+    for f in "${idx[@]}"; do [[ -f "$f" ]] || missing=1; done
+    [[ "$missing" -eq 0 ]] || die "Timed out waiting for BWA index. Lock: $lock"
   fi
 }
 ensure_bwa_index "$REF"
@@ -698,6 +717,8 @@ POOL_PE_R1="$RAW/${SAMPLE}.pool.PE.R1.fastq.gz"
 POOL_PE_R2="$RAW/${SAMPLE}.pool.PE.R2.fastq.gz"
 POOL_SE_ALL="$RAW/${SAMPLE}.pool.SE.all.fastq.gz"
 
+# NOTE: For full resume of fastp+pooling you'd checkpoint this section.
+# We keep the existing behavior (truncate pools) as in your original script.
 : > "$POOL_PE_R1"
 : > "$POOL_PE_R2"
 : > "$POOL_SE_ALL"
@@ -908,7 +929,11 @@ fi
 ###############################################################################
 # POST-FASTP MAPPING CHUNKING (OPTIONAL; REUSE MAX_READS_PER_CHUNK)
 ###############################################################################
-rm -f "$MAPCHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
+if [[ $RESUME -eq 0 ]]; then
+  rm -f "$MAPCHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
+else
+  log "Resume enabled: keeping existing mapchunks if present"
+fi
 
 make_mapchunks_se() {
   local in="$1" prefix="$2"
@@ -955,14 +980,30 @@ make_mapchunks_pe() {
 }
 
 log "STEP: post-fastp mapping chunking"
-make_mapchunks_pe "$POOL_PE_R1" "$POOL_PE_R2" "$MAPCHUNKS/${SAMPLE}.PE.R1_" "$MAPCHUNKS/${SAMPLE}.PE.R2_"
-make_mapchunks_se "$POOL_SE_ALL" "$MAPCHUNKS/${SAMPLE}.SE_"
+if [[ $RESUME -eq 1 ]]; then
+  shopt -s nullglob
+  existing_pe=( "$MAPCHUNKS/${SAMPLE}.PE.R1_"*.fastq.gz )
+  existing_se=( "$MAPCHUNKS/${SAMPLE}.SE_"*.fastq.gz )
+  if [[ ${#existing_pe[@]} -gt 0 || ${#existing_se[@]} -gt 0 ]]; then
+    log "Resume enabled: existing mapchunks found; not regenerating mapchunks"
+  else
+    make_mapchunks_pe "$POOL_PE_R1" "$POOL_PE_R2" "$MAPCHUNKS/${SAMPLE}.PE.R1_" "$MAPCHUNKS/${SAMPLE}.PE.R2_"
+    make_mapchunks_se "$POOL_SE_ALL" "$MAPCHUNKS/${SAMPLE}.SE_"
+  fi
+else
+  make_mapchunks_pe "$POOL_PE_R1" "$POOL_PE_R2" "$MAPCHUNKS/${SAMPLE}.PE.R1_" "$MAPCHUNKS/${SAMPLE}.PE.R2_"
+  make_mapchunks_se "$POOL_SE_ALL" "$MAPCHUNKS/${SAMPLE}.SE_"
+fi
 
 ###############################################################################
-# MAPPING
+# MAPPING (CHUNK-RESUMABLE)
 ###############################################################################
 log "STEP: mapping"
-rm -f "$BAMS/${SAMPLE}."*.bam 2>/dev/null || true
+if [[ $RESUME -eq 0 ]]; then
+  rm -f "$BAMS/${SAMPLE}."*.bam 2>/dev/null || true
+else
+  log "Resume enabled: keeping existing mapped chunk BAMs if present (will skip completed chunks)"
+fi
 
 map_se_mem_chunk() {
   local fq="$1" outbam="$2" tag="$3"
@@ -1016,6 +1057,11 @@ if [[ -s "$POOL_PE_R1" && -s "$POOL_PE_R2" ]]; then
     [[ -f "$r2c" ]] || die "Missing PE R2 mapchunk: $r2c"
     outbam="$BAMS/${SAMPLE}.MAP.PE.${cid}.bam"
 
+    if [[ $RESUME -eq 1 && -s "$outbam" ]]; then
+      log "  Mapping PE chunk ${cid} (skipped; existing BAM found: $(basename "$outbam"))"
+      continue
+    fi
+
     if [[ "$LIBTYPE" == "modern" ]]; then
       log "  Mapping PE chunk ${cid} (mem)"
       map_pe_mem_chunk "$r1c" "$r2c" "$outbam" "mem.PE.${cid}"
@@ -1037,6 +1083,11 @@ if [[ -s "$POOL_SE_ALL" ]]; then
     cid="${cid%.fastq.gz}"
     outbam="$BAMS/${SAMPLE}.MAP.SE.${cid}.bam"
 
+    if [[ $RESUME -eq 1 && -s "$outbam" ]]; then
+      log "  Mapping SE chunk ${cid} (skipped; existing BAM found: $(basename "$outbam"))"
+      continue
+    fi
+
     if [[ "$LIBTYPE" == "modern" ]]; then
       log "  Mapping SE chunk ${cid} (mem)"
       map_se_mem_chunk "$sec" "$outbam" "mem.SE.${cid}"
@@ -1051,11 +1102,11 @@ bam_list=( "$BAMS/${SAMPLE}."*.bam )
 [[ ${#bam_list[@]} -gt 0 ]] || die "No BAMs produced by mapping"
 
 ###############################################################################
-# MERGE
+# MERGE (OVERWRITE PARTIAL OUTPUTS WITH -f)
 ###############################################################################
 MERGED_BAM="$FINAL/${SAMPLE}.merged.bam"
 log "STEP: merge"
-"$SAMTOOLS" merge -@ "$SORT_THREADS" "$MERGED_BAM" "${bam_list[@]}"
+"$SAMTOOLS" merge -f -@ "$SORT_THREADS" "$MERGED_BAM" "${bam_list[@]}"
 file_nonempty "$MERGED_BAM" || die "Merge failed: $MERGED_BAM"
 
 ###############################################################################
@@ -1101,7 +1152,7 @@ RG="@RG\tID:${SAMPLE}\tSM:${SAMPLE}\tPL:illumina\tLB:${SAMPLE}"
 "$SAMTOOLS" index "$OUT_BAM"
 file_nonempty "$OUT_BAM" || die "RG BAM missing/empty"
 
-# NEW: mapDamage runs only if explicitly requested (any library type)
+# mapDamage runs only if explicitly requested (any library type)
 if [[ "$RUN_MAPDAMAGE" -eq 1 ]]; then
   log "STEP: mapDamage"
   "$MAPDAMAGE" -i "$OUT_BAM" --merge-reference-sequences --no-stats -r "$REF" -d "$OUT/${SAMPLE}_mapdamage"
@@ -1172,16 +1223,15 @@ PY
 )
 
 AVG_READLEN=$(
-  "$SAMTOOLS" view -F 2308 "$OUT_BAM" \
+  "$SAMTOOLS" view -F 2308 "$DEDUP_BAM" \
   | awk '{l=length($10); if(l>0){sum+=l;n++}} END{ if(n>0) printf "%.2f", sum/n; else printf "0.00"}'
 )
 
-# Exact mapped bp (sum of read lengths for mapped reads; read-level, not fragment-level)
+# Exact mapped bp on final RG BAM (dedup + RG), consistent with coverage statistics.
 MAPPED_BP=$(
   "$SAMTOOLS" view -F 2308 "$OUT_BAM" \
   | awk '{l=length($10); if(l>0){sum+=l}} END{printf "%.0f", sum+0}'
 )
-
 
 ENDOG=$("$PYTHON" - "$MAPPED_FRAGMENTS_UNIQUE" "$RAW_FRAGMENTS" <<'PY'
 import sys
