@@ -40,6 +40,8 @@ Current version: **v0.1 (active development)**
 - Optional pre-fastp chunking safety valve
 - Optional **per-unit pilot limiting before fastp**
 - Optional post-pooling mapping chunking (restartable)
+- **Restartable mapping (per-chunk resume):** already-produced valid chunk BAMs are not remapped
+- **Disk-space friendly mode:** optionally deletes chunk/mapchunk FASTQs as soon as they are safe to remove
 - Automatic use of pigz if available
 - Fragment-aware duplication rate derived from samtools markdup
 - Optional mapDamage for any library type
@@ -48,13 +50,10 @@ Current version: **v0.1 (active development)**
 
 ## Installation
 
-Clone the repository:
+Clone the repository and make the script executable:
 
     git clone https://github.com/yourusername/plainmap.git
     cd plainmap
-
-Make the script executable:
-
     chmod +x plainmap.sh
 
 PlainMap is a single Bash script. No compilation required.
@@ -72,7 +71,7 @@ All tools must be available on PATH unless overridden via flags.
 - bwa
 - samtools
 - python3
-- GNU split (must support --filter)
+- GNU split (must support `--filter`)
 - gzip and zcat
 
 ### Optional (recommended)
@@ -81,7 +80,7 @@ All tools must be available on PATH unless overridden via flags.
 
 ### Optional (only if enabled)
 
-- mapDamage (required only if --run-mapdamage is used)
+- mapDamage (required only if `--run-mapdamage` is used)
 
 ---
 
@@ -92,7 +91,7 @@ All tools must be available on PATH unless overridden via flags.
 - One FASTQ.gz path per line
 - Absolute or relative paths supported
 - Relative paths resolved relative to the manifest directory
-- Comments allowed with #
+- Comments allowed with `#`
 - Filenames do not need to follow a naming convention
 - Manifest may contain mixed SE and PE
 - Manifest may contain SRA-export FASTQs lacking mate markers
@@ -150,8 +149,8 @@ In this case:
 9. Mapping:
    - modern: bwa mem
    - ancient: bwa aln + samse (SE-like only)
-   - historical: bwa aln + sampe/samse
-10. Merge of mapping outputs
+   - historical: bwa aln + sampe / samse
+10. Merge of mapping outputs (overwrite-safe)
 11. Duplicate marking and filtering (samtools markdup)
 12. Final sorting, indexing, and read group assignment
 13. Optional mapDamage
