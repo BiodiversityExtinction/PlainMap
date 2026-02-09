@@ -19,7 +19,7 @@
 #     * chunk ID lists persisted, so resume works even if mapchunk FASTQs were deleted
 # - pigz is used automatically if available (decompress/test/compress)
 # - fragment-aware stats + duplication rate derived from duplicate flags (samtools markdup)
-# - disk-space friendly: deletes chunk FASTQs and mapchunk FASTQs as soon as safe (default)
+# - disk-space friendly: can delete chunk FASTQs and mapchunk FASTQs as soon as safe
 #
 # Library types:
 #   modern     : bwa mem; maps unmerged PE as PE and SE-like as SE
@@ -70,7 +70,8 @@ MAPDAMAGE=${MAPDAMAGE:-mapDamage}
 PYTHON=${PYTHON:-python3}
 
 # Disk-space behavior:
-#   1 = delete chunk/mapchunk FASTQs as soon as no longer needed (recommended on tight scratch)
+#   1 = delete chunk/mapchunk FASTQs as soon as no longer needed
+#   0 = keep chunk/mapchunk FASTQs until final cleanup (or forever with --keep-intermediate)
 DELETE_AS_YOU_GO=1
 
 ###############################################################################
@@ -102,6 +103,7 @@ Optional:
   --tmpdir DIR                               Custom temp dir (e.g. node-local scratch)
   --keep-intermediate                        Keep <outdir>/<prefix>/work
   --resume | --no-resume
+  --delete-as-you-go | --no-delete-as-you-go (default: delete-as-you-go)
   --dry-run                                  Print plan only
   --validate                                 Check tools + gzip/pigz -t all manifest FASTQs, then exit
   --reset                                    Clear ALL checkpoints for this sample
@@ -146,6 +148,8 @@ while [[ $# -gt 0 ]]; do
     --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
     --resume) RESUME=1; shift ;;
     --no-resume) RESUME=0; shift ;;
+    --delete-as-you-go) DELETE_AS_YOU_GO=1; shift ;;
+    --no-delete-as-you-go) DELETE_AS_YOU_GO=0; shift ;;
     --dry-run) DRYRUN=1; shift ;;
     --validate) VALIDATE_ONLY=1; shift ;;
     --reset) RESET=1; shift ;;
@@ -253,6 +257,7 @@ fi
 # BASIC FILE/VALIDITY HELPERS
 ###############################################################################
 file_nonempty() { [[ -e "$1" && -s "$1" ]]; }
+file_exists() { [[ -e "$1" ]]; }
 
 bam_ok() {
   local b="$1"
@@ -267,7 +272,7 @@ ckpt_file() { echo "$CKPT/${SAMPLE}.$1.done"; }
 ckpt_mark() { [[ $RESUME -eq 1 ]] && date -Is > "$(ckpt_file "$1")"; }
 ckpt_clear() { rm -f "$(ckpt_file "$1")" 2>/dev/null || true; }
 
-# Only use ckpt_ok with real output files.
+# Use with real output files that must be non-empty
 ckpt_ok() {
   local step="$1"; shift
   [[ $RESUME -eq 1 ]] || return 1
@@ -275,6 +280,18 @@ ckpt_ok() {
   local f
   for f in "$@"; do
     file_nonempty "$f" || return 1
+  done
+  return 0
+}
+
+# Use for metadata/list files that may legitimately be empty (must exist)
+ckpt_ok_exists() {
+  local step="$1"; shift
+  [[ $RESUME -eq 1 ]] || return 1
+  [[ -f "$(ckpt_file "$step")" ]] || return 1
+  local f
+  for f in "$@"; do
+    file_exists "$f" || return 1
   done
   return 0
 }
@@ -556,7 +573,6 @@ declare -A R1_BY_KEY
 declare -A R2_BY_KEY
 declare -A UNK_BY_KEY
 
-ALL_FILES=()
 TOTAL_FILES=0
 IDX=0
 
@@ -567,7 +583,6 @@ while read -r f; do
   [[ -r "$f" ]] || die "FASTQ not readable: $f"
 
   TOTAL_FILES=$((TOTAL_FILES+1))
-  ALL_FILES+=( "$f" )
   IDX=$((IDX+1))
 
   hdr="$(first_header_line "$f")"
@@ -682,6 +697,12 @@ else: print(min(c,p))
 PY
 }
 
+chunks_exist() {
+  shopt -s nullglob
+  local a=( "$CHUNKS/${SAMPLE}."*.fastq.gz )
+  [[ ${#a[@]} -gt 0 ]]
+}
+
 ###############################################################################
 # STEP 1: CREATE PRE-FASTP CHUNKS PER UNIT (PE stays paired)
 ###############################################################################
@@ -732,8 +753,9 @@ make_chunks() {
   ckpt_mark chunk
 }
 
-if [[ $RESUME -eq 1 && -f "$(ckpt_file chunk)" ]]; then
-  log "STEP: pre-fastp chunking (skipped; checkpoint present)"
+# BUGFIX: only skip chunking if checkpoint exists AND chunks still exist.
+if [[ $RESUME -eq 1 && -f "$(ckpt_file chunk)" && chunks_exist ]]; then
+  log "STEP: pre-fastp chunking (skipped; checkpoint present + chunks exist)"
 else
   make_chunks
 fi
@@ -961,7 +983,6 @@ run_fastp_and_pool() {
   log "fastp+pool complete. Raw counts written: $RAW_META"
 }
 
-# Require the right pooled outputs to exist before skipping fastp+pool.
 need_fastp_files=( "$RAW_META" "$POOL_SE_ALL" )
 if [[ "$SEQ_MODE" != "SE" ]]; then
   need_fastp_files+=( "$POOL_PE_R1" "$POOL_PE_R2" )
@@ -1034,6 +1055,7 @@ make_mapchunks_pe() {
 }
 
 persist_mapchunk_ids() {
+  # BUGFIX: These lists can be legitimately empty. We must create them regardless.
   : > "$PE_IDLIST"
   : > "$SE_IDLIST"
 
@@ -1064,7 +1086,13 @@ persist_mapchunk_ids() {
 
 log "STEP: post-fastp mapping chunking"
 
-if ! ckpt_ok mapchunk "$PE_IDLIST" "$SE_IDLIST"; then
+# BUGFIX: mapchunk checkpoint must accept empty idlists; also only require PE list when PE is expected.
+need_mapchunk_lists=( "$SE_IDLIST" )
+if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" ]]; then
+  need_mapchunk_lists+=( "$PE_IDLIST" )
+fi
+
+if ! ckpt_ok_exists mapchunk "${need_mapchunk_lists[@]}"; then
   ckpt_clear mapchunk
   rm -f "$MAPCHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
 
@@ -1082,8 +1110,6 @@ fi
 # STEP 4: MAPPING (PER-CHUNK RESUME) + DELETE MAPCHUNK FASTQs AS SOON AS MAPPED
 ###############################################################################
 log "STEP: mapping (per-chunk resume)"
-ckpt_clear map
-
 mkdir -p "$BAMS"
 
 map_se_mem_chunk() {
@@ -1204,7 +1230,7 @@ If you deleted mapchunk FASTQs, resume requires the BAM to exist and be valid."
 }
 
 # Map PE chunk IDs (skip if ancient)
-if [[ "$LIBTYPE" != "ancient" && -s "$PE_IDLIST" ]]; then
+if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
   while read -r cid; do
     [[ -z "$cid" ]] && continue
     map_one_pe_id "$cid"
@@ -1221,7 +1247,7 @@ fi
 
 # Verify BAMs exist for every expected chunk ID
 missing=0
-if [[ "$LIBTYPE" != "ancient" && -s "$PE_IDLIST" ]]; then
+if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
   while read -r cid; do
     [[ -z "$cid" ]] && continue
     bam_ok "$BAMS/${SAMPLE}.MAP.PE.${cid}.bam" || { log "ERROR: Missing/invalid PE BAM for chunk ${cid}"; missing=1; }
@@ -1235,8 +1261,6 @@ if [[ -s "$SE_IDLIST" ]]; then
 fi
 [[ "$missing" -eq 0 ]] || die "Mapping incomplete: one or more expected chunk BAMs are missing/invalid"
 
-ckpt_mark map
-
 ###############################################################################
 # STEP 5: MERGE (OVERWRITE SAFE)
 ###############################################################################
@@ -1245,7 +1269,7 @@ log "STEP: merge"
 
 bam_list=()
 
-if [[ "$LIBTYPE" != "ancient" && -s "$PE_IDLIST" ]]; then
+if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
   while read -r cid; do
     [[ -z "$cid" ]] && continue
     bam_list+=( "$BAMS/${SAMPLE}.MAP.PE.${cid}.bam" )
@@ -1325,7 +1349,6 @@ else
   tmp_rg="$TMP/${SAMPLE}.rg.tmp.bam"
   "$SAMTOOLS" addreplacerg -r "$RG" -o "$tmp_rg" "$FINAL_BAM"
 
-  # Ensure coordinate-sorted output for safe indexing across samtools versions.
   "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$OUT_BAM" "$tmp_rg"
   rm -f "$tmp_rg"
 
