@@ -106,7 +106,7 @@ Optional:
   --delete-as-you-go | --no-delete-as-you-go (default: delete-as-you-go)
   --dry-run                                  Print plan only
   --validate                                 Check tools + gzip/pigz -t all manifest FASTQs, then exit
-  --reset                                    Clear ALL checkpoints for this sample
+  --reset                                    Restart from scratch for this sample (clear prior outputs + checkpoints)
 
 Tool overrides:
   --fastp CMD
@@ -126,25 +126,34 @@ SAMPLE=""
 REF=""
 OUT=""
 
+need_arg() {
+  local opt="$1"
+  local val="${2-}"
+  if [[ -z "$val" || "$val" == --* ]]; then
+    echo "ERROR: $opt requires a value"
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --manifest) MANIFEST="$2"; shift 2 ;;
-    --prefix) SAMPLE="$2"; shift 2 ;;
-    --ref) REF="$2"; shift 2 ;;
-    --outdir) OUT="$2"; shift 2 ;;
-    --library-type) LIBTYPE="$2"; shift 2 ;;
-    --threads) THREADS="$2"; shift 2 ;;
-    --minlength) MINLEN="$2"; shift 2 ;;
-    --mismatch) MISMATCH="$2"; shift 2 ;;
-    --mapq) MAPQ="$2"; shift 2 ;;
-    --max-reads-per-chunk) MAX_READS_PER_CHUNK="$2"; shift 2 ;;
-    --pilot-fragments) PILOT_FRAGMENTS="$2"; shift 2 ;;
-    --adapter-r1) ADAPTER_R1="$2"; shift 2 ;;
-    --adapter-r2) ADAPTER_R2="$2"; shift 2 ;;
+    --manifest) need_arg "$1" "${2-}"; MANIFEST="$2"; shift 2 ;;
+    --prefix) need_arg "$1" "${2-}"; SAMPLE="$2"; shift 2 ;;
+    --ref) need_arg "$1" "${2-}"; REF="$2"; shift 2 ;;
+    --outdir) need_arg "$1" "${2-}"; OUT="$2"; shift 2 ;;
+    --library-type) need_arg "$1" "${2-}"; LIBTYPE="$2"; shift 2 ;;
+    --threads) need_arg "$1" "${2-}"; THREADS="$2"; shift 2 ;;
+    --minlength) need_arg "$1" "${2-}"; MINLEN="$2"; shift 2 ;;
+    --mismatch) need_arg "$1" "${2-}"; MISMATCH="$2"; shift 2 ;;
+    --mapq) need_arg "$1" "${2-}"; MAPQ="$2"; shift 2 ;;
+    --max-reads-per-chunk) need_arg "$1" "${2-}"; MAX_READS_PER_CHUNK="$2"; shift 2 ;;
+    --pilot-fragments) need_arg "$1" "${2-}"; PILOT_FRAGMENTS="$2"; shift 2 ;;
+    --adapter-r1) need_arg "$1" "${2-}"; ADAPTER_R1="$2"; shift 2 ;;
+    --adapter-r2) need_arg "$1" "${2-}"; ADAPTER_R2="$2"; shift 2 ;;
     --trim-only) TRIM_ONLY=1; shift ;;
     --run-mapdamage) RUN_MAPDAMAGE=1; shift ;;
     --no-mapdamage) RUN_MAPDAMAGE=0; shift ;;
-    --tmpdir) TMPDIR_USER="$2"; shift 2 ;;
+    --tmpdir) need_arg "$1" "${2-}"; TMPDIR_USER="$2"; shift 2 ;;
     --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
     --resume) RESUME=1; shift ;;
     --no-resume) RESUME=0; shift ;;
@@ -153,11 +162,11 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRYRUN=1; shift ;;
     --validate) VALIDATE_ONLY=1; shift ;;
     --reset) RESET=1; shift ;;
-    --fastp) FASTP="$2"; shift 2 ;;
-    --bwa) BWA="$2"; shift 2 ;;
-    --samtools) SAMTOOLS="$2"; shift 2 ;;
-    --mapdamage) MAPDAMAGE="$2"; shift 2 ;;
-    --python) PYTHON="$2"; shift 2 ;;
+    --fastp) need_arg "$1" "${2-}"; FASTP="$2"; shift 2 ;;
+    --bwa) need_arg "$1" "${2-}"; BWA="$2"; shift 2 ;;
+    --samtools) need_arg "$1" "${2-}"; SAMTOOLS="$2"; shift 2 ;;
+    --mapdamage) need_arg "$1" "${2-}"; MAPDAMAGE="$2"; shift 2 ;;
+    --python) need_arg "$1" "${2-}"; PYTHON="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "Unknown option $1"; usage ;;
   esac
@@ -297,9 +306,12 @@ ckpt_ok_exists() {
 }
 
 if [[ $RESET -eq 1 ]]; then
-  log "Reset requested: clearing all checkpoints for sample $SAMPLE"
-  rm -f "$CKPT/${SAMPLE}."*.done 2>/dev/null || true
-  rm -f "$RAW_META" "$PE_IDLIST" "$SE_IDLIST" 2>/dev/null || true
+  log "Reset requested: restarting from scratch for sample $SAMPLE"
+  rm -rf "$WORK" "$REPORTS" "$OUT/${SAMPLE}_mapdamage" 2>/dev/null || true
+  rm -f "$OUT/${SAMPLE}.final.RG.bam" "$OUT/${SAMPLE}.final.RG.bam.bai" \
+        "$STATS" "$COV_TSV" 2>/dev/null || true
+  rm -f "$CKPT/${SAMPLE}."*.done "$RAW_META" "$PE_IDLIST" "$SE_IDLIST" 2>/dev/null || true
+  mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
 fi
 
 ###############################################################################
@@ -333,7 +345,9 @@ if [[ $VALIDATE_ONLY -eq 1 ]]; then
   quick_preflight
   n=0
   while read -r f; do
-    [[ -z "$f" || "$f" =~ ^# ]] && continue
+    f="${f#"${f%%[![:space:]]*}"}"
+    f="${f%"${f##*[![:space:]]}"}"
+    [[ -z "$f" || "${f:0:1}" == "#" ]] && continue
     n=$((n+1))
     [[ "$f" = /* ]] || f="$MANIFEST_DIR/$f"
     f="$(resolve_path "$f")"
@@ -577,7 +591,9 @@ TOTAL_FILES=0
 IDX=0
 
 while read -r f; do
-  [[ -z "$f" || "$f" =~ ^# ]] && continue
+  f="${f#"${f%%[![:space:]]*}"}"
+  f="${f%"${f##*[![:space:]]}"}"
+  [[ -z "$f" || "${f:0:1}" == "#" ]] && continue
   [[ "$f" = /* ]] || f="$MANIFEST_DIR/$f"
   f="$(resolve_path "$f")"
   [[ -r "$f" ]] || die "FASTQ not readable: $f"
