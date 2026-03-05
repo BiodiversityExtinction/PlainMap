@@ -170,6 +170,51 @@ Common defaults (you can usually omit these):
 - mapDamage is OFF by default (`--run-mapdamage` enables it)
 - Unmapped FASTQ export is OFF by default (`--emit-unmapped-fastq` enables it)
 
+## Parameters
+
+Required parameters:
+
+| Parameter | Description |
+|---|---|
+| `--manifest FILE` | Manifest with one FASTQ(.gz) path per line. |
+| `--prefix STRING` | Sample/output prefix used in file names and read group tags. |
+| `--ref FILE` | Reference FASTA. |
+| `--outdir DIR` | Output directory. |
+
+Optional parameters:
+
+| Parameter | Default | Description |
+|---|---:|---|
+| `--library-type modern\|ancient\|historical` | `modern` | Mapping mode and aligner strategy. |
+| `--threads INT` | `1` | Threads used by fastp, bwa, samtools, and pigz where applicable. |
+| `--minlength INT` | `30` | Minimum read length after trimming (`fastp -l`). |
+| `--mismatch FLOAT` | `0.01` | Mismatch rate for `bwa aln -n` (ancient/historical). |
+| `--mapq INT` | `20` | MAPQ threshold applied during BAM generation. |
+| `--emit-unmapped-fastq` | off | Export unmapped reads to `SAMPLE.unmapped.*.fastq.gz` without changing final BAM/stats filtering. |
+| `--max-reads-per-chunk INT` | `0` | Pre/post-fastp chunking size cap (`0` disables chunk splitting). |
+| `--pilot-fragments INT` | `0` | Per-unit read/fragment cap before fastp (`0` disables pilot mode). |
+| `--adapter-r1 SEQ` | auto | Explicit adapter for read 1. |
+| `--adapter-r2 SEQ` | auto | Explicit adapter for read 2. |
+| `--trim-only` | off | Run trimming/pooling and exit before mapping. |
+| `--run-mapdamage` | off | Run mapDamage on final BAM. |
+| `--tmpdir DIR` | auto | Custom temp/scratch directory. |
+| `--keep-intermediate` | off | Keep `<outdir>/<prefix>/work` after successful completion. |
+| `--no-resume` | off | Disable checkpoint resume behavior. |
+| `--no-delete-as-you-go` | off | Keep chunk/mapchunk FASTQs until cleanup. |
+| `--dry-run` | off | Validate settings and print planned workflow only. |
+| `--validate` | off | Validate tools and gzip integrity of manifest FASTQs, then exit. |
+| `--reset` | off | Clear prior outputs/checkpoints for this sample and restart from scratch. |
+
+Tool override parameters:
+
+| Parameter | Description |
+|---|---|
+| `--fastp CMD` | fastp executable/command to use. |
+| `--bwa CMD` | bwa executable/command to use. |
+| `--samtools CMD` | samtools executable/command to use. |
+| `--mapdamage CMD` | mapDamage executable/command to use. |
+| `--python CMD` | Python executable/command to use. |
+
 Modern DNA:
 
     bash plainmap.sh \
