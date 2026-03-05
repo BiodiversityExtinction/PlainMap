@@ -45,6 +45,7 @@ Current version: **v0.1 (active development)**
 - Automatic use of pigz if available
 - Fragment-aware duplication rate derived from samtools markdup
 - Optional mapDamage for any library type
+- Optional export of unmapped reads as FASTQ (`samtools fastq`)
 
 ---
 
@@ -52,8 +53,8 @@ Current version: **v0.1 (active development)**
 
 Clone the repository and make the script executable:
 
-    git clone https://github.com/yourusername/plainmap.git
-    cd plainmap
+    git clone https://github.com/BiodiversityExtinction/PlainMap.git
+    cd PlainMap
     chmod +x plainmap.sh
 
 PlainMap is a single Bash script. No compilation required.
@@ -162,6 +163,13 @@ In this case:
 
 ## Usage Examples
 
+Common defaults (you can usually omit these):
+
+- Resume is ON by default (`--no-resume` disables it)
+- Delete-as-you-go is ON by default (`--no-delete-as-you-go` disables it)
+- mapDamage is OFF by default (`--run-mapdamage` enables it)
+- Unmapped FASTQ export is OFF by default (`--emit-unmapped-fastq` enables it)
+
 Modern DNA:
 
     bash plainmap.sh \
@@ -208,6 +216,17 @@ Pilot run:
       --outdir results \
       --pilot-fragments 10000000
 
+Export unmapped reads as FASTQ:
+
+    bash plainmap.sh \
+      --manifest manifest.txt \
+      --prefix SAMPLE1 \
+      --ref reference.fa \
+      --outdir results \
+      --emit-unmapped-fastq
+
+`--emit-unmapped-fastq` does not change final BAM filtering or summary statistics.
+
 ---
 
 ## Output
@@ -223,6 +242,9 @@ Main outputs:
 Optional outputs:
 
 - SAMPLE_mapdamage/ (if enabled)
+- SAMPLE.unmapped.R1.fastq.gz (if `--emit-unmapped-fastq`)
+- SAMPLE.unmapped.R2.fastq.gz (if `--emit-unmapped-fastq`)
+- SAMPLE.unmapped.SE.fastq.gz (if `--emit-unmapped-fastq`)
 
 ---
 

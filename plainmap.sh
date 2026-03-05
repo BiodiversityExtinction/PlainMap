@@ -48,6 +48,7 @@ LIBTYPE="modern"           # modern|ancient|historical
 MAX_READS_PER_CHUNK=0      # 0 disables pre-fastp chunking safety valve
 PILOT_FRAGMENTS=0          # 0 disables pilot; otherwise PER-UNIT cap on fragments BEFORE fastp
 MAPQ=20                    # mapping quality threshold (samtools view -q)
+EMIT_UNMAPPED_FASTQ=0      # 1 exports unmapped reads to FASTQ without changing final BAM/stats behavior
 
 ADAPTER_R1=""
 ADAPTER_R2=""
@@ -93,17 +94,17 @@ Optional:
   --minlength INT                            (default: 30)
   --mismatch FLOAT                           (ancient/historical; bwa aln -n; default: 0.01)
   --mapq INT                                 Mapping quality threshold (default: 20)
+  --emit-unmapped-fastq                      Export unmapped reads to FASTQ (final BAM/stats unchanged)
   --max-reads-per-chunk INT                  (default: 0; disabled) pre-fastp chunking safety valve
   --pilot-fragments INT                      (default: 0; disabled) PER-UNIT cap on fragments before fastp
   --adapter-r1 SEQ
   --adapter-r2 SEQ
   --trim-only                                Trim only (fastp); exit before mapping
   --run-mapdamage                            Run mapDamage (any library type; default OFF)
-  --no-mapdamage                             Do not run mapDamage (default)
   --tmpdir DIR                               Custom temp dir (e.g. node-local scratch)
   --keep-intermediate                        Keep <outdir>/<prefix>/work
-  --resume | --no-resume
-  --delete-as-you-go | --no-delete-as-you-go (default: delete-as-you-go)
+  --no-resume                                Disable resume (default is resume ON)
+  --no-delete-as-you-go                      Keep chunk/mapchunk FASTQs until cleanup
   --dry-run                                  Print plan only
   --validate                                 Check tools + gzip/pigz -t all manifest FASTQs, then exit
   --reset                                    Restart from scratch for this sample (clear prior outputs + checkpoints)
@@ -146,13 +147,15 @@ while [[ $# -gt 0 ]]; do
     --minlength) need_arg "$1" "${2-}"; MINLEN="$2"; shift 2 ;;
     --mismatch) need_arg "$1" "${2-}"; MISMATCH="$2"; shift 2 ;;
     --mapq) need_arg "$1" "${2-}"; MAPQ="$2"; shift 2 ;;
+    --emit-unmapped-fastq) EMIT_UNMAPPED_FASTQ=1; shift ;;
+    --no-emit-unmapped-fastq) EMIT_UNMAPPED_FASTQ=0; shift ;;  # backward-compatible no-op
     --max-reads-per-chunk) need_arg "$1" "${2-}"; MAX_READS_PER_CHUNK="$2"; shift 2 ;;
     --pilot-fragments) need_arg "$1" "${2-}"; PILOT_FRAGMENTS="$2"; shift 2 ;;
     --adapter-r1) need_arg "$1" "${2-}"; ADAPTER_R1="$2"; shift 2 ;;
     --adapter-r2) need_arg "$1" "${2-}"; ADAPTER_R2="$2"; shift 2 ;;
     --trim-only) TRIM_ONLY=1; shift ;;
     --run-mapdamage) RUN_MAPDAMAGE=1; shift ;;
-    --no-mapdamage) RUN_MAPDAMAGE=0; shift ;;
+    --no-mapdamage) RUN_MAPDAMAGE=0; shift ;;                  # backward-compatible no-op
     --tmpdir) need_arg "$1" "${2-}"; TMPDIR_USER="$2"; shift 2 ;;
     --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
     --resume) RESUME=1; shift ;;
@@ -225,12 +228,16 @@ CHUNKS="$WORK/chunks"          # pre-fastp chunks
 TMPBASE="$WORK/tmp"
 MAPCHUNKS="$WORK/mapchunks"    # post-fastp mapping chunks
 BAMS="$WORK/bams"
+UNMAPPED="$WORK/unmapped"
 FINAL="$WORK/final"
 CKPT="$WORK/.checkpoints"
 REPORTS="$OUT/${SAMPLE}/fastp_reports"
 
 STATS="$OUT/${SAMPLE}.plainmap.stats.tsv"
 COV_TSV="$OUT/${SAMPLE}.plainmap.coverage.tsv"
+UNMAPPED_R1_FQ="$OUT/${SAMPLE}.unmapped.R1.fastq.gz"
+UNMAPPED_R2_FQ="$OUT/${SAMPLE}.unmapped.R2.fastq.gz"
+UNMAPPED_SE_FQ="$OUT/${SAMPLE}.unmapped.SE.fastq.gz"
 
 RAW_META="$CKPT/${SAMPLE}.raw_counts.tsv"
 PE_IDLIST="$CKPT/${SAMPLE}.mapchunk_ids.pe.txt"
@@ -242,7 +249,7 @@ else
   TMP="$TMPBASE"
 fi
 
-mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
+mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
 
 ###############################################################################
 # COMPRESSION HELPERS (pigz if available)
@@ -309,9 +316,10 @@ if [[ $RESET -eq 1 ]]; then
   log "Reset requested: restarting from scratch for sample $SAMPLE"
   rm -rf "$WORK" "$REPORTS" "$OUT/${SAMPLE}_mapdamage" 2>/dev/null || true
   rm -f "$OUT/${SAMPLE}.final.RG.bam" "$OUT/${SAMPLE}.final.RG.bam.bai" \
-        "$STATS" "$COV_TSV" 2>/dev/null || true
+        "$STATS" "$COV_TSV" \
+        "$UNMAPPED_R1_FQ" "$UNMAPPED_R2_FQ" "$UNMAPPED_SE_FQ" 2>/dev/null || true
   rm -f "$CKPT/${SAMPLE}."*.done "$RAW_META" "$PE_IDLIST" "$SE_IDLIST" 2>/dev/null || true
-  mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
+  mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
 fi
 
 ###############################################################################
@@ -372,6 +380,7 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  minlength:           $MINLEN"
   log "  mismatch (aln):      $MISMATCH"
   log "  mapq:                $MAPQ"
+  log "  emit_unmapped_fastq: $EMIT_UNMAPPED_FASTQ"
   log "  pilot_fragments:     $PILOT_FRAGMENTS (PER-UNIT cap)"
   log "  max_reads_per_chunk: $MAX_READS_PER_CHUNK"
   log "  run_mapdamage:       $RUN_MAPDAMAGE (any library type)"
@@ -1128,11 +1137,34 @@ fi
 log "STEP: mapping (per-chunk resume)"
 mkdir -p "$BAMS"
 
+sam_to_chunk_bam() {
+  local sam_in="$1" bam_out="$2"
+  "$SAMTOOLS" view -q "$MAPQ" -u "$sam_in" > "$bam_out"
+}
+
+capture_unmapped_from_sam() {
+  local sam_in="$1" out_prefix="$2"
+  [[ "$EMIT_UNMAPPED_FASTQ" -eq 1 ]] || return 0
+
+  local comp_cmd=( gzip )
+  if [[ $HAVE_PIGZ -eq 1 ]]; then
+    comp_cmd=( pigz -p "$THREADS" )
+  fi
+
+  "$SAMTOOLS" fastq -f 4 -n \
+    -1 >("${comp_cmd[@]}" > "${out_prefix}.R1.fastq.gz") \
+    -2 >("${comp_cmd[@]}" > "${out_prefix}.R2.fastq.gz") \
+    -s >("${comp_cmd[@]}" > "${out_prefix}.SE.fastq.gz") \
+    -0 /dev/null \
+    "$sam_in" >/dev/null
+}
+
 map_se_mem_chunk() {
-  local fq="$1" outbam="$2" tag="$3"
+  local fq="$1" outbam="$2" tag="$3" unmapped_prefix="$4"
   local tmpbam="${outbam}.tmp"
   "$BWA" mem -t "$THREADS" "$REF" "$fq" > "$TMP/${SAMPLE}.${tag}.sam"
-  "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.${tag}.sam" > "$TMP/${SAMPLE}.${tag}.bam"
+  capture_unmapped_from_sam "$TMP/${SAMPLE}.${tag}.sam" "$unmapped_prefix"
+  sam_to_chunk_bam "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam"
   "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$tmpbam" "$TMP/${SAMPLE}.${tag}.bam"
   rm -f "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam"
   bam_ok "$tmpbam" || die "Produced invalid BAM (SE mem): $tmpbam"
@@ -1140,10 +1172,11 @@ map_se_mem_chunk() {
 }
 
 map_pe_mem_chunk() {
-  local fq1="$1" fq2="$2" outbam="$3" tag="$4"
+  local fq1="$1" fq2="$2" outbam="$3" tag="$4" unmapped_prefix="$5"
   local tmpbam="${outbam}.tmp"
   "$BWA" mem -t "$THREADS" "$REF" "$fq1" "$fq2" > "$TMP/${SAMPLE}.${tag}.sam"
-  "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.${tag}.sam" > "$TMP/${SAMPLE}.${tag}.bam"
+  capture_unmapped_from_sam "$TMP/${SAMPLE}.${tag}.sam" "$unmapped_prefix"
+  sam_to_chunk_bam "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam"
   "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$tmpbam" "$TMP/${SAMPLE}.${tag}.bam"
   rm -f "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam"
   bam_ok "$tmpbam" || die "Produced invalid BAM (PE mem): $tmpbam"
@@ -1151,11 +1184,12 @@ map_pe_mem_chunk() {
 }
 
 map_se_aln_chunk() {
-  local fq="$1" outbam="$2" tag="$3"
+  local fq="$1" outbam="$2" tag="$3" unmapped_prefix="$4"
   local tmpbam="${outbam}.tmp"
   "$BWA" aln -l 999 -n "$MISMATCH" -t "$THREADS" "$REF" "$fq" > "$TMP/${SAMPLE}.${tag}.sai"
   "$BWA" samse "$REF" "$TMP/${SAMPLE}.${tag}.sai" "$fq" > "$TMP/${SAMPLE}.${tag}.sam"
-  "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.${tag}.sam" > "$TMP/${SAMPLE}.${tag}.bam.tmp"
+  capture_unmapped_from_sam "$TMP/${SAMPLE}.${tag}.sam" "$unmapped_prefix"
+  sam_to_chunk_bam "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
   "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$tmpbam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
   rm -f "$TMP/${SAMPLE}.${tag}.sai" "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
   bam_ok "$tmpbam" || die "Produced invalid BAM (SE aln): $tmpbam"
@@ -1163,7 +1197,7 @@ map_se_aln_chunk() {
 }
 
 map_pe_aln_chunk() {
-  local fq1="$1" fq2="$2" outbam="$3" tag="$4"
+  local fq1="$1" fq2="$2" outbam="$3" tag="$4" unmapped_prefix="$5"
   local tmpbam="${outbam}.tmp"
 
   local h1 h2 n1x n2x
@@ -1174,7 +1208,8 @@ map_pe_aln_chunk() {
   "$BWA" aln -l 999 -n "$MISMATCH" -t "$THREADS" "$REF" "$fq1" > "$TMP/${SAMPLE}.${tag}.1.sai"
   "$BWA" aln -l 999 -n "$MISMATCH" -t "$THREADS" "$REF" "$fq2" > "$TMP/${SAMPLE}.${tag}.2.sai"
   "$BWA" sampe "$REF" "$TMP/${SAMPLE}.${tag}.1.sai" "$TMP/${SAMPLE}.${tag}.2.sai" "$fq1" "$fq2" > "$TMP/${SAMPLE}.${tag}.sam"
-  "$SAMTOOLS" view -q "$MAPQ" -u "$TMP/${SAMPLE}.${tag}.sam" > "$TMP/${SAMPLE}.${tag}.bam.tmp"
+  capture_unmapped_from_sam "$TMP/${SAMPLE}.${tag}.sam" "$unmapped_prefix"
+  sam_to_chunk_bam "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
   "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$tmpbam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
   rm -f "$TMP/${SAMPLE}.${tag}.1.sai" "$TMP/${SAMPLE}.${tag}.2.sai" "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
   bam_ok "$tmpbam" || die "Produced invalid BAM (PE aln): $tmpbam"
@@ -1186,11 +1221,21 @@ map_one_pe_id() {
   local r1c="$MAPCHUNKS/${SAMPLE}.PE.R1_${cid}.fastq.gz"
   local r2c="$MAPCHUNKS/${SAMPLE}.PE.R2_${cid}.fastq.gz"
   local outbam="$BAMS/${SAMPLE}.MAP.PE.${cid}.bam"
+  local unmapped_prefix="$UNMAPPED/${SAMPLE}.PE.${cid}.unmapped"
+  local ur1="${unmapped_prefix}.R1.fastq.gz"
+  local ur2="${unmapped_prefix}.R2.fastq.gz"
+  local use="${unmapped_prefix}.SE.fastq.gz"
+  local have_unmapped=1
+  [[ -f "$ur1" && -f "$ur2" && -f "$use" ]] || have_unmapped=0
 
   if bam_ok "$outbam"; then
-    log "  PE chunk ${cid}: already mapped (valid BAM exists) -> skipping"
-    [[ $DELETE_AS_YOU_GO -eq 1 ]] && rm -f "$r1c" "$r2c" 2>/dev/null || true
-    return 0
+    if [[ "$EMIT_UNMAPPED_FASTQ" -eq 1 && "$have_unmapped" -eq 0 ]]; then
+      log "  PE chunk ${cid}: BAM exists but unmapped FASTQ chunk outputs are missing -> remapping required"
+    else
+      log "  PE chunk ${cid}: already mapped (valid BAM exists) -> skipping"
+      [[ $DELETE_AS_YOU_GO -eq 1 ]] && rm -f "$r1c" "$r2c" 2>/dev/null || true
+      return 0
+    fi
   fi
 
   [[ -f "$r1c" && -f "$r2c" ]] || die "PE chunk ${cid} is missing FASTQs needed to map:
@@ -1200,10 +1245,10 @@ If you deleted mapchunk FASTQs, resume requires the BAM to exist and be valid."
 
   if [[ "$LIBTYPE" == "modern" ]]; then
     log "  Mapping PE chunk ${cid} (mem)"
-    map_pe_mem_chunk "$r1c" "$r2c" "$outbam" "mem.PE.${cid}"
+    map_pe_mem_chunk "$r1c" "$r2c" "$outbam" "mem.PE.${cid}" "$unmapped_prefix"
   elif [[ "$LIBTYPE" == "historical" ]]; then
     log "  Mapping PE chunk ${cid} (aln/sampe)"
-    map_pe_aln_chunk "$r1c" "$r2c" "$outbam" "aln.PE.${cid}"
+    map_pe_aln_chunk "$r1c" "$r2c" "$outbam" "aln.PE.${cid}" "$unmapped_prefix"
   else
     die "Internal error: PE mapping called for ancient"
   fi
@@ -1219,11 +1264,21 @@ map_one_se_id() {
   local cid="$1"
   local sec="$MAPCHUNKS/${SAMPLE}.SE_${cid}.fastq.gz"
   local outbam="$BAMS/${SAMPLE}.MAP.SE.${cid}.bam"
+  local unmapped_prefix="$UNMAPPED/${SAMPLE}.SE.${cid}.unmapped"
+  local ur1="${unmapped_prefix}.R1.fastq.gz"
+  local ur2="${unmapped_prefix}.R2.fastq.gz"
+  local use="${unmapped_prefix}.SE.fastq.gz"
+  local have_unmapped=1
+  [[ -f "$ur1" && -f "$ur2" && -f "$use" ]] || have_unmapped=0
 
   if bam_ok "$outbam"; then
-    log "  SE chunk ${cid}: already mapped (valid BAM exists) -> skipping"
-    [[ $DELETE_AS_YOU_GO -eq 1 ]] && rm -f "$sec" 2>/dev/null || true
-    return 0
+    if [[ "$EMIT_UNMAPPED_FASTQ" -eq 1 && "$have_unmapped" -eq 0 ]]; then
+      log "  SE chunk ${cid}: BAM exists but unmapped FASTQ chunk outputs are missing -> remapping required"
+    else
+      log "  SE chunk ${cid}: already mapped (valid BAM exists) -> skipping"
+      [[ $DELETE_AS_YOU_GO -eq 1 ]] && rm -f "$sec" 2>/dev/null || true
+      return 0
+    fi
   fi
 
   [[ -f "$sec" ]] || die "SE chunk ${cid} is missing FASTQ needed to map:
@@ -1232,10 +1287,10 @@ If you deleted mapchunk FASTQs, resume requires the BAM to exist and be valid."
 
   if [[ "$LIBTYPE" == "modern" ]]; then
     log "  Mapping SE chunk ${cid} (mem)"
-    map_se_mem_chunk "$sec" "$outbam" "mem.SE.${cid}"
+    map_se_mem_chunk "$sec" "$outbam" "mem.SE.${cid}" "$unmapped_prefix"
   else
     log "  Mapping SE chunk ${cid} (aln/samse)"
-    map_se_aln_chunk "$sec" "$outbam" "aln.SE.${cid}"
+    map_se_aln_chunk "$sec" "$outbam" "aln.SE.${cid}" "$unmapped_prefix"
   fi
 
   bam_ok "$outbam" || die "SE chunk ${cid}: produced BAM is invalid: $outbam"
@@ -1276,6 +1331,63 @@ if [[ -s "$SE_IDLIST" ]]; then
   done < "$SE_IDLIST"
 fi
 [[ "$missing" -eq 0 ]] || die "Mapping incomplete: one or more expected chunk BAMs are missing/invalid"
+
+###############################################################################
+# OPTIONAL: UNMAPPED FASTQ EXPORT
+###############################################################################
+make_empty_gz() {
+  local out="$1"
+  if [[ $HAVE_PIGZ -eq 1 ]]; then
+    printf '' | pigz -p "$THREADS" > "$out"
+  else
+    printf '' | gzip > "$out"
+  fi
+}
+
+export_unmapped_fastq() {
+  ckpt_clear unmapped_fastq
+  log "STEP: unmapped FASTQ export"
+
+  rm -f "$UNMAPPED_R1_FQ" "$UNMAPPED_R2_FQ" "$UNMAPPED_SE_FQ" 2>/dev/null || true
+  make_empty_gz "$UNMAPPED_R1_FQ"
+  make_empty_gz "$UNMAPPED_R2_FQ"
+  make_empty_gz "$UNMAPPED_SE_FQ"
+
+  local cid prefix ur1 ur2 use
+  if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
+    while read -r cid; do
+      [[ -z "$cid" ]] && continue
+      prefix="$UNMAPPED/${SAMPLE}.PE.${cid}.unmapped"
+      ur1="${prefix}.R1.fastq.gz"; ur2="${prefix}.R2.fastq.gz"; use="${prefix}.SE.fastq.gz"
+      [[ -f "$ur1" && -f "$ur2" && -f "$use" ]] || die "Missing unmapped FASTQ chunk outputs for PE chunk ${cid}; rerun with --reset if needed."
+      cat "$ur1" >> "$UNMAPPED_R1_FQ"
+      cat "$ur2" >> "$UNMAPPED_R2_FQ"
+      cat "$use" >> "$UNMAPPED_SE_FQ"
+    done < "$PE_IDLIST"
+  fi
+
+  if [[ -s "$SE_IDLIST" ]]; then
+    while read -r cid; do
+      [[ -z "$cid" ]] && continue
+      prefix="$UNMAPPED/${SAMPLE}.SE.${cid}.unmapped"
+      ur1="${prefix}.R1.fastq.gz"; ur2="${prefix}.R2.fastq.gz"; use="${prefix}.SE.fastq.gz"
+      [[ -f "$ur1" && -f "$ur2" && -f "$use" ]] || die "Missing unmapped FASTQ chunk outputs for SE chunk ${cid}; rerun with --reset if needed."
+      cat "$ur1" >> "$UNMAPPED_R1_FQ"
+      cat "$ur2" >> "$UNMAPPED_R2_FQ"
+      cat "$use" >> "$UNMAPPED_SE_FQ"
+    done < "$SE_IDLIST"
+  fi
+
+  ckpt_mark unmapped_fastq
+}
+
+if [[ "$EMIT_UNMAPPED_FASTQ" -eq 1 ]]; then
+  if ckpt_ok_exists unmapped_fastq "$UNMAPPED_R1_FQ" "$UNMAPPED_R2_FQ" "$UNMAPPED_SE_FQ"; then
+    log "STEP: unmapped FASTQ export (skipped; checkpoint present)"
+  else
+    export_unmapped_fastq
+  fi
+fi
 
 ###############################################################################
 # STEP 5: MERGE (OVERWRITE SAFE)
