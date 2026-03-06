@@ -126,6 +126,7 @@ MANIFEST=""
 SAMPLE=""
 REF=""
 OUT=""
+ORIG_ARGS=( "$@" )
 
 need_arg() {
   local opt="$1"
@@ -390,6 +391,44 @@ if [[ $DRYRUN -eq 1 ]]; then
 fi
 
 quick_preflight
+
+log_run_configuration() {
+  local cmdline_q=""
+  if [[ ${#ORIG_ARGS[@]} -gt 0 ]]; then
+    cmdline_q="$(printf '%q ' "${ORIG_ARGS[@]}")"
+  fi
+
+  log "Run configuration:"
+  log "  sample:              $SAMPLE"
+  log "  library_type:        $LIBTYPE"
+  log "  manifest:            $MANIFEST"
+  log "  ref:                 $REF"
+  log "  outdir:              $OUT"
+  log "  threads:             $THREADS"
+  log "  minlength:           $MINLEN"
+  log "  mismatch (aln):      $MISMATCH"
+  log "  mapq:                $MAPQ"
+  log "  pilot_fragments:     $PILOT_FRAGMENTS"
+  log "  max_reads_per_chunk: $MAX_READS_PER_CHUNK"
+  log "  emit_unmapped_fastq: $EMIT_UNMAPPED_FASTQ"
+  log "  run_mapdamage:       $RUN_MAPDAMAGE"
+  log "  resume:              $RESUME"
+  log "  delete_as_you_go:    $DELETE_AS_YOU_GO"
+  log "  keep_intermediate:   $KEEP_INTERMEDIATE"
+  log "  reset:               $RESET"
+  log "  trim_only:           $TRIM_ONLY"
+  log "  fastp:               $FASTP"
+  log "  bwa:                 $BWA"
+  log "  samtools:            $SAMTOOLS"
+  log "  mapdamage:           $MAPDAMAGE"
+  log "  python:              $PYTHON"
+  [[ -n "$TMPDIR_USER" ]] && log "  tmpdir override:     $TMPDIR_USER" || log "  tmpdir override:     (none)"
+  [[ -n "$ADAPTER_R1" ]] && log "  adapter_r1:          set" || log "  adapter_r1:          auto"
+  [[ -n "$ADAPTER_R2" ]] && log "  adapter_r2:          set" || log "  adapter_r2:          auto"
+  [[ -n "$cmdline_q" ]] && log "  cli_args:            $cmdline_q"
+}
+
+log_run_configuration
 
 ###############################################################################
 # BWA INDEX (PARALLEL SAFE + STALE LOCK RECOVERY)
