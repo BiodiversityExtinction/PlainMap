@@ -582,6 +582,11 @@ first_header_line() {
   "${ZCAT[@]}" "$fq" | head -n 1 || true
 }
 
+sample_header_lines() {
+  local fq="$1" n="${2:-3}"
+  "${ZCAT[@]}" "$fq" | awk -v max="$n" 'NR % 4 == 1 { print; c++; if (c >= max) exit }' || true
+}
+
 normalize_qname() {
   local hdr="$1"
   local first="${hdr%% *}"
@@ -610,8 +615,28 @@ classify_fastq_direction() {
   if [[ "$firsttok" == */1 ]]; then echo "R1"; return; fi
   if [[ "$firsttok" == */2 ]]; then echo "R2"; return; fi
 
-  if [[ "$secondtok" == "1" ]]; then echo "R1"; return; fi
-  if [[ "$secondtok" == "2" ]]; then echo "R2"; return; fi
+  if [[ "$secondtok" == "1" || "$secondtok" == "2" ]]; then
+    local sampled consistent value s_hdr s_first s_rest s_second
+    sampled=0
+    consistent=1
+    value="$secondtok"
+    while IFS= read -r s_hdr; do
+      [[ -n "$s_hdr" ]] || continue
+      s_first="${s_hdr%% *}"
+      s_rest="${s_hdr#"$s_first"}"; s_rest="${s_rest# }"
+      s_second="${s_rest%% *}"
+      sampled=$((sampled+1))
+      if [[ "$s_second" != "$value" ]]; then
+        consistent=0
+        break
+      fi
+    done < <(sample_header_lines "$fq" 3)
+
+    if [[ "$sampled" -gt 0 && "$consistent" -eq 1 ]]; then
+      if [[ "$value" == "1" ]]; then echo "R1"; return; fi
+      if [[ "$value" == "2" ]]; then echo "R2"; return; fi
+    fi
+  fi
 
   echo "UNKNOWN"
 }
@@ -692,6 +717,7 @@ for k in "${!UNK_BY_KEY[@]}"; do
   mapfile -t entries <<< "${UNK_BY_KEY[$k]}"
   if [[ "${#entries[@]}" -eq 1 ]]; then
     f="${entries[0]#*:}"
+    log "SRA/unknown-header fallback: treating key '$k' as SE ($f)"
     SE_FILES+=( "$f" )
   elif [[ "${#entries[@]}" -eq 2 ]]; then
     e1="${entries[0]}"; e2="${entries[1]}"
@@ -710,12 +736,18 @@ for k in "${!UNK_BY_KEY[@]}"; do
 $f1
 $f2"
 
+    log "SRA/unknown-header fallback: assigning PE by manifest order for key '$k'"
+    log "  R1: $f1"
+    log "  R2: $f2"
+
     [[ -z "${R1_BY_KEY[$k]:-}" && -z "${R2_BY_KEY[$k]:-}" ]] || die "Internal error: UNKNOWN key '$k' already classified"
     R1_BY_KEY["$k"]="$f1"
     R2_BY_KEY["$k"]="$f2"
     PE_KEYS+=( "$k" )
   else
-    die "Ambiguous SRA-style grouping for key '$k': found ${#entries[@]} files with no mate markers. PlainMap refuses to guess."
+    die "Ambiguous SRA-style grouping for key '$k': found ${#entries[@]} files with no mate markers:
+${UNK_BY_KEY[$k]}
+PlainMap refuses to guess."
   fi
 done
 
