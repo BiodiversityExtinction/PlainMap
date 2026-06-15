@@ -170,6 +170,12 @@ Common defaults (you can usually omit these):
 - mapDamage is OFF by default (`--run-mapdamage` enables it)
 - Unmapped FASTQ export is OFF by default (`--emit-unmapped-fastq` enables it)
 
+### Mapping modes
+
+- `modern`: maps unmerged paired-end reads as paired-end with `bwa mem`, and maps SE-like reads as single-end.
+- `ancient-fast`: maps only SE-like reads (merged reads, unpaired reads, and true single-end reads) with `bwa aln + samse`.
+- `ancient-all`: maps both unmerged paired-end reads with `bwa aln + sampe` and SE-like reads with `bwa aln + samse`.
+
 ## Parameters
 
 Required parameters:
