@@ -1,6 +1,6 @@
 # PlainMap
 
-PlainMap is a transparent, failure-aware mapping pipeline for **ancient, historical, and modern DNA** designed to **just run** on HPC systems with minimal fuss.
+PlainMap is a transparent, failure-aware mapping pipeline for **ancient-fast, ancient-all, and modern DNA** designed to **just run** on HPC systems with minimal fuss.
 
 PlainMap is implemented as a **single Bash script** and is intentionally conservative: when inputs are ambiguous, it fails loudly rather than guessing.
 
@@ -149,8 +149,8 @@ In this case:
 8. Optional post-fastp mapping chunking
 9. Mapping:
    - modern: bwa mem
-   - ancient: bwa aln + samse (SE-like only)
-   - historical: bwa aln + sampe / samse
+   - ancient-fast: bwa aln + samse (SE-like only)
+   - ancient-all: bwa aln + sampe / samse
 10. Merge of mapping outputs (overwrite-safe)
 11. Duplicate marking and filtering (samtools markdup)
 12. Final sorting, indexing, and read group assignment
@@ -185,10 +185,10 @@ Optional parameters:
 
 | Parameter | Default | Description |
 |---|---:|---|
-| `--library-type modern\|ancient\|historical` | `modern` | Mapping mode and aligner strategy. |
+| `--library-type modern\|ancient-fast\|ancient-all` | `modern` | Mapping mode and aligner strategy. Deprecated aliases: `ancient` -> `ancient-fast`, `historical` -> `ancient-all`. |
 | `--threads INT` | `1` | Threads used by fastp, bwa, samtools, and pigz where applicable. |
 | `--minlength INT` | `30` | Minimum read length after trimming (`fastp -l`). |
-| `--mismatch FLOAT` | `0.01` | Mismatch rate for `bwa aln -n` (ancient/historical). |
+| `--mismatch FLOAT` | `0.01` | Mismatch rate for `bwa aln -n` (ancient-fast/ancient-all). |
 | `--mapq INT` | `20` | MAPQ threshold applied during BAM generation. |
 | `--emit-unmapped-fastq` | off | Export unmapped reads to `SAMPLE.unmapped.*.fastq.gz` without changing final BAM/stats filtering. |
 | `--max-reads-per-chunk INT` | `0` | Pre/post-fastp chunking size cap (`0` disables chunk splitting). |
@@ -224,14 +224,24 @@ Modern DNA:
       --outdir results \
       --threads 16
 
-Ancient DNA:
+Ancient-fast DNA:
 
     bash plainmap.sh \
       --manifest manifest.txt \
       --prefix SAMPLE1 \
       --ref reference.fa \
       --outdir results \
-      --library-type ancient \
+      --library-type ancient-fast \
+      --threads 16
+
+Ancient-all DNA:
+
+    bash plainmap.sh \
+      --manifest manifest.txt \
+      --prefix SAMPLE1 \
+      --ref reference.fa \
+      --outdir results \
+      --library-type ancient-all \
       --threads 16
 
 Trim-only mode:

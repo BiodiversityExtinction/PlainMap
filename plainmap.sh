@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PlainMap v0.1
-# Transparent, failure-aware mapping pipeline for ancient and modern DNA
+# Transparent, failure-aware mapping pipeline for ancient-fast, ancient-all, and modern DNA
 #
 # Key properties (current dev version):
 # - Manifest can contain mixed SE + PE, mixed platforms, mixed naming conventions
@@ -22,9 +22,9 @@
 # - disk-space friendly: can delete chunk FASTQs and mapchunk FASTQs as soon as safe
 #
 # Library types:
-#   modern     : bwa mem; maps unmerged PE as PE and SE-like as SE
-#   ancient    : bwa aln/samse; maps SE-like only (merged + unpaired + SE)
-#   historical : bwa aln; maps unmerged PE with aln+sampe AND SE-like with aln+samse
+#   modern       : bwa mem; maps unmerged PE as PE and SE-like as SE
+#   ancient-fast : bwa aln/samse; maps SE-like only (merged + unpaired + SE)
+#   ancient-all  : bwa aln; maps unmerged PE with aln+sampe AND SE-like with aln+samse
 #
 set -euo pipefail
 
@@ -43,8 +43,8 @@ VERSION="0.1"
 
 THREADS=1
 MINLEN=30
-MISMATCH=0.01              # bwa aln -n (ancient/historical)
-LIBTYPE="modern"           # modern|ancient|historical
+MISMATCH=0.01              # bwa aln -n (ancient-fast/ancient-all)
+LIBTYPE="modern"           # modern|ancient-fast|ancient-all
 MAX_READS_PER_CHUNK=0      # 0 disables pre-fastp chunking safety valve
 PILOT_FRAGMENTS=0          # 0 disables pilot; otherwise PER-UNIT cap on fragments BEFORE fastp
 MAPQ=20                    # mapping quality threshold (samtools view -q)
@@ -89,10 +89,11 @@ Required:
   --outdir DIR
 
 Optional:
-  --library-type modern|ancient|historical   (default: modern)
+  --library-type modern|ancient-fast|ancient-all
+                                            Deprecated aliases accepted: ancient, historical
   --threads INT                              (default: 1)
   --minlength INT                            (default: 30)
-  --mismatch FLOAT                           (ancient/historical; bwa aln -n; default: 0.01)
+  --mismatch FLOAT                           (ancient-fast/ancient-all; bwa aln -n; default: 0.01)
   --mapq INT                                 Mapping quality threshold (default: 20)
   --emit-unmapped-fastq                      Export unmapped reads to FASTQ (final BAM/stats unchanged)
   --max-reads-per-chunk INT                  (default: 0; disabled) pre-fastp chunking safety valve
@@ -127,6 +128,7 @@ SAMPLE=""
 REF=""
 OUT=""
 ORIG_ARGS=( "$@" )
+LIBTYPE_INPUT=""
 
 need_arg() {
   local opt="$1"
@@ -177,8 +179,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$MANIFEST" || -z "$SAMPLE" || -z "$REF" || -z "$OUT" ]] && usage
-[[ "$LIBTYPE" == "modern" || "$LIBTYPE" == "ancient" || "$LIBTYPE" == "historical" ]] || {
-  echo "ERROR: --library-type must be modern|ancient|historical"
+LIBTYPE_INPUT="$LIBTYPE"
+[[ "$LIBTYPE" == "modern" || "$LIBTYPE" == "ancient-fast" || "$LIBTYPE" == "ancient-all" || "$LIBTYPE" == "ancient" || "$LIBTYPE" == "historical" ]] || {
+  echo "ERROR: --library-type must be modern|ancient-fast|ancient-all"
+  echo "       Deprecated aliases still accepted: ancient -> ancient-fast, historical -> ancient-all"
   exit 1
 }
 [[ "$MAPQ" =~ ^[0-9]+$ ]] || { echo "ERROR: --mapq must be an integer"; exit 1; }
@@ -217,8 +221,23 @@ exec > >(tee "$LOG") 2>&1
 log() { echo "[$(date '+%F %T')] $*"; }
 die() { log "ERROR: $*"; exit 1; }
 
+canonicalize_library_type() {
+  case "$LIBTYPE" in
+    ancient)
+      log "WARNING: --library-type ancient is deprecated; use ancient-fast instead."
+      LIBTYPE="ancient-fast"
+      ;;
+    historical)
+      log "WARNING: --library-type historical is deprecated; use ancient-all instead."
+      LIBTYPE="ancient-all"
+      ;;
+  esac
+}
+
 PIPE_T0=$(date +%s)
 SORT_THREADS=$(( THREADS > 2 ? THREADS / 2 : 1 ))
+
+canonicalize_library_type
 
 ###############################################################################
 # WORK DIRS
@@ -377,6 +396,7 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  outdir:   $OUT"
   log "Settings:"
   log "  library_type:        $LIBTYPE"
+  [[ "$LIBTYPE_INPUT" != "$LIBTYPE" ]] && log "  library_type_input:  $LIBTYPE_INPUT (deprecated alias)"
   log "  threads:             $THREADS"
   log "  minlength:           $MINLEN"
   log "  mismatch (aln):      $MISMATCH"
@@ -401,6 +421,7 @@ log_run_configuration() {
   log "Run configuration:"
   log "  sample:              $SAMPLE"
   log "  library_type:        $LIBTYPE"
+  [[ "$LIBTYPE_INPUT" != "$LIBTYPE" ]] && log "  library_type_input:  $LIBTYPE_INPUT (deprecated alias)"
   log "  manifest:            $MANIFEST"
   log "  ref:                 $REF"
   log "  outdir:              $OUT"
@@ -1158,7 +1179,7 @@ persist_mapchunk_ids() {
   shopt -s nullglob
   local f base cid
 
-  if [[ "$LIBTYPE" != "ancient" ]]; then
+  if [[ "$LIBTYPE" != "ancient-fast" ]]; then
     for f in "$MAPCHUNKS/${SAMPLE}.PE.R1_"*.fastq.gz; do
       base=$(basename "$f")
       cid="${base#${SAMPLE}.PE.R1_}"
@@ -1184,7 +1205,7 @@ log "STEP: post-fastp mapping chunking"
 
 # BUGFIX: mapchunk checkpoint must accept empty idlists; also only require PE list when PE is expected.
 need_mapchunk_lists=( "$SE_IDLIST" )
-if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" ]]; then
+if [[ "$LIBTYPE" != "ancient-fast" && "$SEQ_MODE" != "SE" ]]; then
   need_mapchunk_lists+=( "$PE_IDLIST" )
 fi
 
@@ -1192,7 +1213,7 @@ if ! ckpt_ok_exists mapchunk "${need_mapchunk_lists[@]}"; then
   ckpt_clear mapchunk
   rm -f "$MAPCHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
 
-  if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" ]]; then
+  if [[ "$LIBTYPE" != "ancient-fast" && "$SEQ_MODE" != "SE" ]]; then
     make_mapchunks_pe "$POOL_PE_R1" "$POOL_PE_R2" "$MAPCHUNKS/${SAMPLE}.PE.R1_" "$MAPCHUNKS/${SAMPLE}.PE.R2_"
   fi
   make_mapchunks_se "$POOL_SE_ALL" "$MAPCHUNKS/${SAMPLE}.SE_"
@@ -1317,11 +1338,11 @@ If you deleted mapchunk FASTQs, resume requires the BAM to exist and be valid."
   if [[ "$LIBTYPE" == "modern" ]]; then
     log "  Mapping PE chunk ${cid} (mem)"
     map_pe_mem_chunk "$r1c" "$r2c" "$outbam" "mem.PE.${cid}" "$unmapped_prefix"
-  elif [[ "$LIBTYPE" == "historical" ]]; then
+  elif [[ "$LIBTYPE" == "ancient-all" ]]; then
     log "  Mapping PE chunk ${cid} (aln/sampe)"
     map_pe_aln_chunk "$r1c" "$r2c" "$outbam" "aln.PE.${cid}" "$unmapped_prefix"
   else
-    die "Internal error: PE mapping called for ancient"
+    die "Internal error: PE mapping called for ancient-fast"
   fi
 
   bam_ok "$outbam" || die "PE chunk ${cid}: produced BAM is invalid: $outbam"
@@ -1371,8 +1392,8 @@ If you deleted mapchunk FASTQs, resume requires the BAM to exist and be valid."
   fi
 }
 
-# Map PE chunk IDs (skip if ancient)
-if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
+# Map PE chunk IDs (skip if ancient-fast)
+if [[ "$LIBTYPE" != "ancient-fast" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
   while read -r cid; do
     [[ -z "$cid" ]] && continue
     map_one_pe_id "$cid"
@@ -1389,7 +1410,7 @@ fi
 
 # Verify BAMs exist for every expected chunk ID
 missing=0
-if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
+if [[ "$LIBTYPE" != "ancient-fast" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
   while read -r cid; do
     [[ -z "$cid" ]] && continue
     bam_ok "$BAMS/${SAMPLE}.MAP.PE.${cid}.bam" || { log "ERROR: Missing/invalid PE BAM for chunk ${cid}"; missing=1; }
@@ -1425,7 +1446,7 @@ export_unmapped_fastq() {
   make_empty_gz "$UNMAPPED_SE_FQ"
 
   local cid prefix ur1 ur2 use
-  if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
+  if [[ "$LIBTYPE" != "ancient-fast" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
     while read -r cid; do
       [[ -z "$cid" ]] && continue
       prefix="$UNMAPPED/${SAMPLE}.PE.${cid}.unmapped"
@@ -1468,7 +1489,7 @@ log "STEP: merge"
 
 bam_list=()
 
-if [[ "$LIBTYPE" != "ancient" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
+if [[ "$LIBTYPE" != "ancient-fast" && "$SEQ_MODE" != "SE" && -s "$PE_IDLIST" ]]; then
   while read -r cid; do
     [[ -z "$cid" ]] && continue
     bam_list+=( "$BAMS/${SAMPLE}.MAP.PE.${cid}.bam" )
@@ -1506,7 +1527,7 @@ if ckpt_ok dedup "$MARKDUP_BAM" "$DEDUP_BAM" && bam_ok "$MARKDUP_BAM" && bam_ok 
 else
   ckpt_clear dedup
 
-  if [[ ( "$LIBTYPE" == "modern" || "$LIBTYPE" == "historical" ) && "$SEQ_MODE" != "SE" ]]; then
+  if [[ ( "$LIBTYPE" == "modern" || "$LIBTYPE" == "ancient-all" ) && "$SEQ_MODE" != "SE" ]]; then
     "$SAMTOOLS" sort -n -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.namesort.bam" "$MERGED_BAM"
     "$SAMTOOLS" fixmate -m -@ "$SORT_THREADS" "$FINAL/${SAMPLE}.namesort.bam" "$FINAL/${SAMPLE}.fixmate.bam"
     "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.coordsort.bam" "$FINAL/${SAMPLE}.fixmate.bam"
