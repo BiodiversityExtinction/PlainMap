@@ -90,7 +90,6 @@ Required:
 
 Optional:
   --library-type modern|ancient-fast|ancient-all
-                                            Deprecated aliases accepted: ancient, historical
   --threads INT                              (default: 1)
   --minlength INT                            (default: 30)
   --mismatch FLOAT                           (ancient-fast/ancient-all; bwa aln -n; default: 0.01)
@@ -128,7 +127,6 @@ SAMPLE=""
 REF=""
 OUT=""
 ORIG_ARGS=( "$@" )
-LIBTYPE_INPUT=""
 
 need_arg() {
   local opt="$1"
@@ -179,10 +177,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$MANIFEST" || -z "$SAMPLE" || -z "$REF" || -z "$OUT" ]] && usage
-LIBTYPE_INPUT="$LIBTYPE"
-[[ "$LIBTYPE" == "modern" || "$LIBTYPE" == "ancient-fast" || "$LIBTYPE" == "ancient-all" || "$LIBTYPE" == "ancient" || "$LIBTYPE" == "historical" ]] || {
+[[ "$LIBTYPE" == "modern" || "$LIBTYPE" == "ancient-fast" || "$LIBTYPE" == "ancient-all" ]] || {
   echo "ERROR: --library-type must be modern|ancient-fast|ancient-all"
-  echo "       Deprecated aliases still accepted: ancient -> ancient-fast, historical -> ancient-all"
   exit 1
 }
 [[ "$MAPQ" =~ ^[0-9]+$ ]] || { echo "ERROR: --mapq must be an integer"; exit 1; }
@@ -221,23 +217,8 @@ exec > >(tee "$LOG") 2>&1
 log() { echo "[$(date '+%F %T')] $*"; }
 die() { log "ERROR: $*"; exit 1; }
 
-canonicalize_library_type() {
-  case "$LIBTYPE" in
-    ancient)
-      log "WARNING: --library-type ancient is deprecated; use ancient-fast instead."
-      LIBTYPE="ancient-fast"
-      ;;
-    historical)
-      log "WARNING: --library-type historical is deprecated; use ancient-all instead."
-      LIBTYPE="ancient-all"
-      ;;
-  esac
-}
-
 PIPE_T0=$(date +%s)
 SORT_THREADS=$(( THREADS > 2 ? THREADS / 2 : 1 ))
-
-canonicalize_library_type
 
 ###############################################################################
 # WORK DIRS
@@ -396,7 +377,6 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  outdir:   $OUT"
   log "Settings:"
   log "  library_type:        $LIBTYPE"
-  [[ "$LIBTYPE_INPUT" != "$LIBTYPE" ]] && log "  library_type_input:  $LIBTYPE_INPUT (deprecated alias)"
   log "  threads:             $THREADS"
   log "  minlength:           $MINLEN"
   log "  mismatch (aln):      $MISMATCH"
@@ -421,7 +401,6 @@ log_run_configuration() {
   log "Run configuration:"
   log "  sample:              $SAMPLE"
   log "  library_type:        $LIBTYPE"
-  [[ "$LIBTYPE_INPUT" != "$LIBTYPE" ]] && log "  library_type_input:  $LIBTYPE_INPUT (deprecated alias)"
   log "  manifest:            $MANIFEST"
   log "  ref:                 $REF"
   log "  outdir:              $OUT"

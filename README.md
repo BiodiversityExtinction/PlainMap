@@ -185,7 +185,7 @@ Optional parameters:
 
 | Parameter | Default | Description |
 |---|---:|---|
-| `--library-type modern\|ancient-fast\|ancient-all` | `modern` | Mapping mode and aligner strategy. Deprecated aliases: `ancient` -> `ancient-fast`, `historical` -> `ancient-all`. |
+| `--library-type modern\|ancient-fast\|ancient-all` | `modern` | Mapping mode and aligner strategy. |
 | `--threads INT` | `1` | Threads used by fastp, bwa, samtools, and pigz where applicable. |
 | `--minlength INT` | `30` | Minimum read length after trimming (`fastp -l`). |
 | `--mismatch FLOAT` | `0.01` | Mismatch rate for `bwa aln -n` (ancient-fast/ancient-all). |
