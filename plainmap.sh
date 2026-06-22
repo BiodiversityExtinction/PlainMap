@@ -282,6 +282,25 @@ bam_ok() {
   "$SAMTOOLS" quickcheck -v "$b" >/dev/null 2>&1
 }
 
+bam_ok_with_retries() {
+  local b="$1"
+  local attempts="${2:-1}"
+  local sleep_s="${3:-0}"
+  local i=1
+
+  while [[ "$i" -le "$attempts" ]]; do
+    if bam_ok "$b"; then
+      return 0
+    fi
+    if [[ "$i" -lt "$attempts" ]]; then
+      log "  BAM validation not yet passing for $(basename "$b") (attempt $i/$attempts); retrying after ${sleep_s}s"
+      sleep "$sleep_s"
+    fi
+    i=$((i+1))
+  done
+  return 1
+}
+
 ###############################################################################
 # CHECKPOINTS
 ###############################################################################
@@ -1489,7 +1508,7 @@ else
   ckpt_clear merge
   mkdir -p "$FINAL"
   "$SAMTOOLS" merge -f -@ "$SORT_THREADS" "$MERGED_BAM" "${bam_list[@]}"
-  bam_ok "$MERGED_BAM" || die "Merge failed/invalid: $MERGED_BAM"
+  bam_ok_with_retries "$MERGED_BAM" 5 15 || die "Merge failed/invalid after retries: $MERGED_BAM"
   ckpt_mark merge
 fi
 
