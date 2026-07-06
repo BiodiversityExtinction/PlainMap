@@ -1229,7 +1229,7 @@ mkdir -p "$BAMS"
 
 sam_to_chunk_bam() {
   local sam_in="$1" bam_out="$2"
-  "$SAMTOOLS" view -q "$MAPQ" -u "$sam_in" > "$bam_out"
+  "$SAMTOOLS" view -F 4 -q "$MAPQ" -u "$sam_in" > "$bam_out"
 }
 
 capture_unmapped_from_sam() {
@@ -1538,7 +1538,7 @@ else
   rm -f "$FINAL/${SAMPLE}.coordsort.bam"
   bam_ok "$MARKDUP_BAM" || die "markdup failed/invalid: $MARKDUP_BAM"
 
-  "$SAMTOOLS" view -b -F 1024 "$MARKDUP_BAM" > "$TMP/${SAMPLE}.nodup.unsorted.bam"
+  "$SAMTOOLS" view -b -F 1028 "$MARKDUP_BAM" > "$TMP/${SAMPLE}.nodup.unsorted.bam"
   "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$DEDUP_BAM" "$TMP/${SAMPLE}.nodup.unsorted.bam"
   rm -f "$TMP/${SAMPLE}.nodup.unsorted.bam"
   bam_ok "$DEDUP_BAM" || die "Dedup BAM missing/invalid: $DEDUP_BAM"
