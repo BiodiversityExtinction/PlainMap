@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# PlainMap v0.1
-# Transparent, failure-aware mapping pipeline for ancient-fast, ancient-all, and modern DNA
+# PlainMap v0.1.0
+# Lightweight, restartable mapping pipeline for ancient-fast, ancient-all, and modern DNA
 #
 # Key properties (current dev version):
 # - Manifest can contain mixed SE + PE, mixed platforms, mixed naming conventions
@@ -39,7 +39,7 @@ fi
 ###############################################################################
 # DEFAULTS
 ###############################################################################
-VERSION="0.1"
+VERSION="0.1.0"
 
 THREADS=1
 MINLEN=30
