@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use PlainMap, please cite it using these metadata."
+type: software
+title: "PlainMap: a simple mapping pipeline for ancient and modern DNA"
+version: "0.1.0"
+date-released: 2026-07-07
+authors:
+  - family-names: Wesbury
+    given-names: Michael V
+    email: micwe@dtu.dk
+repository-code: "https://github.com/BiodiversityExtinction/PlainMap"
+license: MIT
+keywords:
+  - bioinformatics
+  - ancient DNA
+  - read mapping
+  - FASTQ
+  - BAM

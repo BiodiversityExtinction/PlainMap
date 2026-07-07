@@ -1,10 +1,10 @@
 # PlainMap
 
-PlainMap is a transparent, failure-aware mapping pipeline for **ancient-fast, ancient-all, and modern DNA** designed to **just run** on HPC systems with minimal fuss.
+PlainMap is a lightweight, restartable mapping pipeline for modern and degraded DNA sequencing data, designed to process heterogeneous FASTQ datasets with minimal configuration.
 
-PlainMap is implemented as a **single Bash script** and is intentionally conservative: when inputs are ambiguous, it fails loudly rather than guessing.
+PlainMap is implemented as a **single Bash script** and focuses on preprocessing, mapping, duplicate handling, BAM generation, and summary statistics without requiring a workflow engine or complex configuration system.
 
-Current version: **v0.1 (active development)**
+Current version: **v0.1.0**
 
 ---
 
@@ -136,6 +136,10 @@ In this case:
 ---
 
 ## Pipeline Overview
+
+![PlainMap workflow overview](paper/figure1.png)
+
+*Figure 1. PlainMap workflow from heterogeneous FASTQ input through header-based pairing inference, optional chunking and pilot subsampling, fastp preprocessing, mode-specific mapping, BAM processing, and summary statistics.*
 
 1. Preflight checks (tools, gzip support, split features)
 2. Manifest parsing and path resolution
@@ -330,7 +334,7 @@ Reported fields include:
 
 ---
 
-## Limitations (v0.1)
+## Limitations (v0.1.0)
 
 - Single read group per sample
 - No QC plotting
@@ -341,6 +345,12 @@ Reported fields include:
 
 ## Development Status
 
-PlainMap is **v0.1** and under active development.
+PlainMap is **v0.1.0** and under active development.
 
 Issues, feedback, and pull requests are welcome.
+
+---
+
+## Citation
+
+If you use PlainMap, please cite the repository metadata in [CITATION.cff](CITATION.cff). A JOSS submission manuscript is provided in [paper/paper.md](paper/paper.md).
