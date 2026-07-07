@@ -46,3 +46,9 @@ PlainMap was developed to support the analysis of ancient, historical, and moder
 PlainMap is particularly well suited to exploratory sequencing projects in which mapping strategies, reference genomes, or library characteristics are uncertain and require empirical evaluation. The inclusion of pilot subsampling, multiple alignment modes, and restartable execution enables rapid testing of alternative approaches while reducing the computational cost of interrupted or repeated analyses.
 
 By focusing exclusively on preprocessing, mapping, and BAM generation, PlainMap provides a lightweight alternative to larger workflow-based frameworks for users who require a lightweight mapping workflow while retaining flexibility over downstream analytical decisions.
+
+# AI Usage Disclosure
+
+Generative AI tools were used throughout the design, implementation, documentation, testing, and manuscript preparation of PlainMap. AI-assisted interactions contributed suggestions for software architecture, implementation details, debugging, edge-case identification, error handling, code refinement, and technical writing.
+
+The author retained full responsibility for all software design decisions, validation procedures, and final code. AI-generated suggestions were treated as advisory and were critically assessed before adoption. All code, analyses, and manuscript text were manually reviewed, tested, revised, and verified by the author prior to inclusion in the final software release and manuscript.
