@@ -139,7 +139,7 @@ In this case:
 
 ![PlainMap workflow overview](paper/figure1.png)
 
-*Figure 1. PlainMap workflow from heterogeneous FASTQ input through header-based pairing inference, optional chunking and pilot subsampling, fastp preprocessing, mode-specific mapping, BAM processing, and summary statistics.*
+*Figure 1. PlainMap workflow from heterogeneous FASTQ input through header-based pairing inference, optional pre-trimming pilot subsampling and adaptive chunking, fastp preprocessing, mode-specific mapping, BAM processing, and summary statistics. Optional outputs include mapDamage analyses and FASTQ files containing unmapped reads.*
 
 1. Preflight checks (tools, gzip support, split features)
 2. Manifest parsing and path resolution

@@ -21,7 +21,7 @@ bibliography: paper.bib
 
 PlainMap is a lightweight and restartable read mapping pipeline for ancient and modern DNA sequencing data. Implemented as a single Bash script, the software focuses specifically on preprocessing, mapping, duplicate removal, and BAM generation while avoiding workflow engines and complex configuration systems. PlainMap supports heterogeneous sequencing datasets, including mixed single-end and paired-end libraries, multiple sequencing platforms, and ambiguous SRA-exported FASTQ formats. The pipeline additionally provides deterministic chunking, restartable execution, conservative validation procedures, and optional pilot subsampling of raw fragments for empirical comparison of mapping strategies.
 
-![PlainMap workflow overview. Heterogeneous FASTQ inputs are classified by header content, optionally chunked or pilot-subsampled, preprocessed with fastp, mapped with mode-specific BWA strategies, and converted into duplicate-filtered BAM files and summary statistics.](figure1.png)
+![PlainMap workflow overview. Heterogeneous FASTQ inputs are classified by header content before optional pre-trimming pilot subsampling and adaptive chunking, preprocessing with fastp, mode-specific BWA mapping, and conversion into duplicate-filtered BAM files and summary statistics. Optional outputs include mapDamage analyses and FASTQ files containing unmapped reads.](figure1.png)
 
 # Statement of Need
 
