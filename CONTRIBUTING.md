@@ -1,6 +1,6 @@
 # Contributing to PlainMap
 
-PlainMap is intended to stay lightweight, transparent in behavior, and easy to run on HPC systems. Contributions that improve robustness, documentation, portability, or reviewer/user testability are welcome.
+PlainMap is intended to stay lightweight, restartable, and easy to run on heterogeneous FASTQ datasets. Contributions that improve robustness, documentation, portability, or reviewer/user testability are welcome.
 
 ## Reporting Bugs
 
