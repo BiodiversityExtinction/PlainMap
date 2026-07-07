@@ -13,7 +13,7 @@ authors:
 affiliations:
   - name: Department of Health Technology, Section for Bioinformatics, Technical University of Denmark, Kongens Lyngby, Denmark
     index: 1
-date: 07 July 2026
+date: 7 July 2026
 bibliography: paper.bib
 ---
 
@@ -26,6 +26,8 @@ PlainMap is a lightweight and restartable read mapping pipeline for ancient and 
 # Statement of Need
 
 Read mapping is a foundational step in next-generation sequencing analysis, but practical implementation frequently requires multiple preprocessing and optimization steps, including adapter trimming, read merging, filtering, duplicate removal, and mapper parameter tuning. These decisions become particularly important when working with ancient and historical DNA, where short fragment lengths, post-mortem damage, and divergence from available reference genomes can influence mapping performance and make optimal alignment strategies difficult to predict a priori. In addition, many sequencing projects involve heterogeneous datasets containing mixed short-read sequencing platforms, inconsistent FASTQ naming conventions, and combinations of single-end and paired-end libraries. Together, these factors often necessitate empirical testing of alternative mapping approaches and substantial preprocessing before mapping can begin. At the same time, increasing sequencing throughput has led to larger datasets and longer mapping runtimes, making restartable execution increasingly important for efficient exploratory analyses.
+
+# State of the Field
 
 Several established frameworks support read mapping for ancient and modern DNA, including PALEOMIX [@schubert2014paleomix], nf-core/eager [@fellows_yates2021eager], GENERODE [@kutschera2022generode], and Mapache [@neuenschwander2023mapache]. These frameworks provide extensive functionality and scalability, frequently integrating downstream analyses such as contamination estimation, genotyping, or population genetic inference. While well suited to large-scale and standardized analyses, they typically rely on workflow engines and structured configuration systems that introduce additional layers of abstraction between users and pipeline execution. For researchers performing exploratory analyses, testing alternative mapping strategies, or working with heterogeneous datasets, this complexity can complicate debugging, obscure failure modes, and increase the overhead associated with rapid methodological iteration. This creates a need for lightweight mapping workflows that minimize configuration overhead, support heterogeneous datasets, facilitate rapid testing of alternative mapping strategies, and remain compatible with downstream project-specific analytical pipelines.
 
@@ -52,3 +54,7 @@ By focusing exclusively on preprocessing, mapping, and BAM generation, PlainMap 
 Generative AI tools were used throughout the design, implementation, documentation, testing, and manuscript preparation of PlainMap. AI-assisted interactions contributed suggestions for software architecture, implementation details, debugging, edge-case identification, error handling, code refinement, and technical writing.
 
 The author retained full responsibility for all software design decisions, validation procedures, and final code. AI-generated suggestions were treated as advisory and were critically assessed before adoption. All code, analyses, and manuscript text were manually reviewed, tested, revised, and verified by the author prior to inclusion in the final software release and manuscript.
+
+# Acknowledgements
+
+No external financial support was received specifically for the development of PlainMap.
