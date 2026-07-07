@@ -57,4 +57,4 @@ The author retained full responsibility for all software design decisions, valid
 
 # Acknowledgements
 
-No external financial support was received specifically for the development of PlainMap.
+MVW was supported by a Novo Nordisk Emerging Investigator grant (#NNF24SA0093839).
