@@ -1,0 +1,42 @@
+name: PlainMap smoke test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fastp bwa samtools
+
+      - name: Check shell syntax
+        run: bash -n plainmap.sh
+
+      - name: Check example FASTQ integrity
+        run: gzip -t example/reads_R1.fastq.gz example/reads_R2.fastq.gz
+
+      - name: Run toy example
+        working-directory: example
+        run: |
+          bash ../plainmap.sh \
+            --manifest manifest.txt \
+            --prefix toy \
+            --ref reference.fa \
+            --outdir output \
+            --threads 1 \
+            --library-type modern
+
+      - name: Check expected outputs
+        run: |
+          test -s example/output/toy.final.RG.bam
+          test -s example/output/toy.final.RG.bam.bai
+          test -s example/output/toy.plainmap.stats.tsv
+          test -s example/output/toy.plainmap.coverage.tsv
