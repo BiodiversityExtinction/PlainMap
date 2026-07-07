@@ -354,3 +354,7 @@ Issues, feedback, and pull requests are welcome.
 ## Citation
 
 If you use PlainMap, please cite the repository metadata in [CITATION.cff](CITATION.cff). A JOSS submission manuscript is provided in [paper/paper.md](paper/paper.md).
+
+## Contributing
+
+Bug reports, feature requests, and pull requests are welcome. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for reporting guidelines and the suggested smoke test.
