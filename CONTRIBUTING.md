@@ -33,11 +33,12 @@ Features are more likely to fit if they:
 Before opening a pull request:
 
 ```bash
-bash -n plainmap.sh
-gzip -t example/reads_R1.fastq.gz example/reads_R2.fastq.gz
-cd example
-bash ../plainmap.sh --manifest manifest.txt --prefix toy --ref reference.fa --outdir output --threads 1 --library-type modern
+bash tests/run_tests.sh
 ```
+
+The suite generates a temporary mixed SRA-style PE/SE dataset and exercises all mapping
+modes, resume configuration checks, forced chunking equivalence, checkpoint reuse, BAM
+invariants, summary-statistic formulas, and corrupt FASTQ handling.
 
 If your change affects outputs, please describe the expected behavior change and update the README or example documentation where relevant.
 

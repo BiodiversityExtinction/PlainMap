@@ -337,7 +337,7 @@ Reported fields include:
 - trimmed, merged, and unpaired counts
 - mapped reads and fragments (pre/post deduplication)
 - endogenous fraction
-- duplication rate from duplicate flags
+- exact duplicate-fragment count and duplication rate from duplicate flags
 - average read length
 - mapped base pairs
 - genome-wide average depth

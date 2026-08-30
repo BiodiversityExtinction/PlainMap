@@ -20,6 +20,7 @@ Expected main outputs:
 - `output/toy.final.RG.bam.bai`
 - `output/toy.plainmap.stats.tsv`
 - `output/toy.plainmap.coverage.tsv`
+- `output/toy.plainmap.run-config.tsv`
 - `output/toy_plainmap.log`
 
 The example is intentionally minimal and is meant only to verify installation and command-line behavior.
