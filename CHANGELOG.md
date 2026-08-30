@@ -18,7 +18,7 @@ Initial public release.
 - Optional mapDamage integration.
 - Fragment-aware summary statistics.
 - Toy example dataset for smoke testing.
-- Workflow figure, citation metadata, and MIT license.
+- Citation metadata and MIT license.
 
 ### Changed
 
