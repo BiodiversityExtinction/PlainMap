@@ -29,3 +29,4 @@ Initial public release.
 
 - Improved handling of SRA paired-end FASTQ files with matching read names across R1 and R2.
 - Added retry logic around merged BAM validation.
+- Added strict resume configuration tracking. PlainMap now refuses to reuse outputs or checkpoints if any effective parameter, input identity, script, or tool command has changed, and reports the differences.

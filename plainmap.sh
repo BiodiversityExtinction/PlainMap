@@ -94,7 +94,7 @@ Optional:
   --minlength INT                            (default: 30)
   --mismatch FLOAT                           (ancient-fast/ancient-all; bwa aln -n; default: 0.01)
   --mapq INT                                 Mapping quality threshold (default: 20)
-  --emit-unmapped-fastq                      Export unmapped reads to FASTQ (final BAM/stats unchanged)
+  --emit-unmapped-fastq                      Export unmapped reads to FASTQ
   --max-reads-per-chunk INT                  (default: 0; disabled) pre-fastp chunking safety valve
   --pilot-fragments INT                      (default: 0; disabled) PER-UNIT cap on fragments before fastp
   --adapter-r1 SEQ
@@ -107,7 +107,7 @@ Optional:
   --no-delete-as-you-go                      Keep chunk/mapchunk FASTQs until cleanup
   --dry-run                                  Print plan only
   --validate                                 Check tools + gzip/pigz -t all manifest FASTQs, then exit
-  --reset                                    Restart from scratch for this sample (clear prior outputs + checkpoints)
+  --reset                                    Restart from scratch and accept the current configuration
 
 Tool overrides:
   --fastp CMD
@@ -115,6 +115,11 @@ Tool overrides:
   --samtools CMD
   --mapdamage CMD
   --python CMD
+
+Resume safety:
+  PlainMap records the effective run configuration for each prefix. Any changed
+  parameter, input/output path, or tool command causes an error before processing.
+  Use --reset to intentionally restart with a different configuration.
 EOF
 exit 0
 }
@@ -211,6 +216,9 @@ mkdir -p "$OUT"
 MANIFEST="$(resolve_path "$MANIFEST")"
 REF="$(resolve_path "$REF")"
 OUT="$(resolve_abs_path "$OUT")"
+if [[ -n "$TMPDIR_USER" ]]; then
+  TMPDIR_USER="$(resolve_abs_path "$TMPDIR_USER")"
+fi
 MANIFEST_DIR="$(dirname "$MANIFEST")"
 
 ###############################################################################
@@ -245,6 +253,8 @@ REPORTS="$OUT/${SAMPLE}/fastp_reports"
 
 STATS="$OUT/${SAMPLE}.plainmap.stats.tsv"
 COV_TSV="$OUT/${SAMPLE}.plainmap.coverage.tsv"
+OUT_BAM="$OUT/${SAMPLE}.final.RG.bam"
+RUN_CONFIG="$OUT/${SAMPLE}.plainmap.run-config.tsv"
 UNMAPPED_R1_FQ="$OUT/${SAMPLE}.unmapped.R1.fastq.gz"
 UNMAPPED_R2_FQ="$OUT/${SAMPLE}.unmapped.R2.fastq.gz"
 UNMAPPED_SE_FQ="$OUT/${SAMPLE}.unmapped.SE.fastq.gz"
@@ -345,7 +355,7 @@ if [[ $RESET -eq 1 ]]; then
   log "Reset requested: restarting from scratch for sample $SAMPLE"
   rm -rf "$WORK" "$REPORTS" "$OUT/${SAMPLE}_mapdamage" 2>/dev/null || true
   rm -f "$OUT/${SAMPLE}.final.RG.bam" "$OUT/${SAMPLE}.final.RG.bam.bai" \
-        "$STATS" "$COV_TSV" \
+        "$STATS" "$COV_TSV" "$RUN_CONFIG" \
         "$UNMAPPED_R1_FQ" "$UNMAPPED_R2_FQ" "$UNMAPPED_SE_FQ" 2>/dev/null || true
   rm -f "$CKPT/${SAMPLE}."*.done "$RAW_META" "$PE_IDLIST" "$SE_IDLIST" 2>/dev/null || true
   mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
@@ -418,6 +428,128 @@ if [[ $DRYRUN -eq 1 ]]; then
   exit 0
 fi
 
+###############################################################################
+# RESUME CONFIGURATION SAFETY
+###############################################################################
+file_sha256() {
+  "$PYTHON" - "$1" <<'PY'
+import hashlib
+import sys
+
+h = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        h.update(block)
+print(h.hexdigest())
+PY
+}
+
+file_identity() {
+  "$PYTHON" - "$1" <<'PY'
+import os
+import sys
+
+st = os.stat(sys.argv[1])
+print(f"{st.st_size}:{st.st_mtime_ns}")
+PY
+}
+
+write_run_config() {
+  local destination="$1"
+  local script_path manifest_hash script_hash ref_identity
+  script_path="$(resolve_path "$0")"
+  manifest_hash="$(file_sha256 "$MANIFEST")"
+  script_hash="$(file_sha256 "$script_path")"
+  ref_identity="$(file_identity "$REF")"
+
+  {
+    printf 'config_schema\t1\n'
+    printf 'plainmap_version\t%s\n' "$VERSION"
+    printf 'plainmap_script\t%s\n' "$script_path"
+    printf 'plainmap_script_sha256\t%s\n' "$script_hash"
+    printf 'manifest\t%s\n' "$MANIFEST"
+    printf 'manifest_sha256\t%s\n' "$manifest_hash"
+    printf 'prefix\t%s\n' "$SAMPLE"
+    printf 'reference\t%s\n' "$REF"
+    printf 'reference_size_mtime_ns\t%s\n' "$ref_identity"
+    printf 'outdir\t%s\n' "$OUT"
+    printf 'library_type\t%s\n' "$LIBTYPE"
+    printf 'threads\t%s\n' "$THREADS"
+    printf 'minlength\t%s\n' "$MINLEN"
+    printf 'mismatch\t%s\n' "$MISMATCH"
+    printf 'mapq\t%s\n' "$MAPQ"
+    printf 'emit_unmapped_fastq\t%s\n' "$EMIT_UNMAPPED_FASTQ"
+    printf 'max_reads_per_chunk\t%s\n' "$MAX_READS_PER_CHUNK"
+    printf 'pilot_fragments\t%s\n' "$PILOT_FRAGMENTS"
+    printf 'adapter_r1\t%s\n' "${ADAPTER_R1:-<auto>}"
+    printf 'adapter_r2\t%s\n' "${ADAPTER_R2:-<auto>}"
+    printf 'trim_only\t%s\n' "$TRIM_ONLY"
+    printf 'run_mapdamage\t%s\n' "$RUN_MAPDAMAGE"
+    printf 'tmpdir\t%s\n' "${TMPDIR_USER:-<default>}"
+    printf 'keep_intermediate\t%s\n' "$KEEP_INTERMEDIATE"
+    printf 'resume\t%s\n' "$RESUME"
+    printf 'delete_as_you_go\t%s\n' "$DELETE_AS_YOU_GO"
+    printf 'fastp\t%s\n' "$FASTP"
+    printf 'bwa\t%s\n' "$BWA"
+    printf 'samtools\t%s\n' "$SAMTOOLS"
+    printf 'mapdamage\t%s\n' "$MAPDAMAGE"
+    printf 'python\t%s\n' "$PYTHON"
+  } > "$destination"
+}
+
+prior_run_artifacts_exist() {
+  [[ -e "$OUT_BAM" || -e "${OUT_BAM}.bai" || -e "$STATS" || -e "$COV_TSV" ]] && return 0
+  [[ -n "$(find "$WORK" "$REPORTS" -type f -print -quit 2>/dev/null)" ]] && return 0
+  return 1
+}
+
+report_config_changes() {
+  "$PYTHON" - "$RUN_CONFIG" "$1" <<'PY'
+import sys
+
+def read_config(path):
+    values = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            key, separator, value = line.rstrip("\n").partition("\t")
+            if separator:
+                values[key] = value
+    return values
+
+previous = read_config(sys.argv[1])
+current = read_config(sys.argv[2])
+for key in sorted(previous.keys() | current.keys()):
+    if previous.get(key) != current.get(key):
+        print(f"  {key}: previous={previous.get(key, '<missing>')!r}; current={current.get(key, '<missing>')!r}")
+PY
+}
+
+enforce_run_config() {
+  local current_config="${RUN_CONFIG}.current.$$"
+  write_run_config "$current_config"
+
+  if [[ -e "$RUN_CONFIG" ]]; then
+    if ! cmp -s "$RUN_CONFIG" "$current_config"; then
+      log "Resume configuration mismatch for sample $SAMPLE:"
+      report_config_changes "$current_config"
+      rm -f "$current_config"
+      die "Refusing to reuse existing outputs or checkpoints with changed settings. Re-run with the original configuration, or use --reset to restart from scratch."
+    fi
+    rm -f "$current_config"
+    log "Run configuration matches: $RUN_CONFIG"
+    return
+  fi
+
+  if prior_run_artifacts_exist; then
+    rm -f "$current_config"
+    die "Existing outputs or checkpoints were found, but no run-configuration file exists. PlainMap cannot verify that this legacy run used the same settings. Use --reset to restart from scratch, or use a new --prefix."
+  fi
+
+  mv "$current_config" "$RUN_CONFIG"
+  log "Run configuration recorded: $RUN_CONFIG"
+}
+
+enforce_run_config
 quick_preflight
 
 log_run_configuration() {
@@ -1329,6 +1461,12 @@ map_one_pe_id() {
 
   if bam_ok "$outbam"; then
     if [[ "$EMIT_UNMAPPED_FASTQ" -eq 1 && "$have_unmapped" -eq 0 ]]; then
+      if [[ ! -f "$r1c" || ! -f "$r2c" ]]; then
+        die "Cannot reproduce missing unmapped FASTQ outputs for PE chunk ${cid}.
+A valid chunk BAM exists, but unmapped chunk outputs and one or both source mapchunk FASTQs are missing.
+The recorded run configuration is unchanged, so required intermediate files were likely removed.
+Restore the missing files or use --reset to restart from scratch."
+      fi
       log "  PE chunk ${cid}: BAM exists but unmapped FASTQ chunk outputs are missing -> remapping required"
     else
       log "  PE chunk ${cid}: already mapped (valid BAM exists) -> skipping"
@@ -1372,6 +1510,12 @@ map_one_se_id() {
 
   if bam_ok "$outbam"; then
     if [[ "$EMIT_UNMAPPED_FASTQ" -eq 1 && "$have_unmapped" -eq 0 ]]; then
+      if [[ ! -f "$sec" ]]; then
+        die "Cannot reproduce missing unmapped FASTQ outputs for SE chunk ${cid}.
+A valid chunk BAM exists, but unmapped chunk outputs and the source mapchunk FASTQ are missing.
+The recorded run configuration is unchanged, so required intermediate files were likely removed.
+Restore the missing files or use --reset to restart from scratch."
+      fi
       log "  SE chunk ${cid}: BAM exists but unmapped FASTQ chunk outputs are missing -> remapping required"
     else
       log "  SE chunk ${cid}: already mapped (valid BAM exists) -> skipping"
@@ -1559,7 +1703,6 @@ fi
 # STEP 7: FINAL SORT + RG (RG OUTPUT GUARANTEED SORTED) + INDEX
 ###############################################################################
 FINAL_BAM="$FINAL/${SAMPLE}.final.bam"
-OUT_BAM="$OUT/${SAMPLE}.final.RG.bam"
 
 log "STEP: final sort+index + read groups"
 

@@ -174,6 +174,18 @@ Common defaults (you can usually omit these):
 - mapDamage is OFF by default (`--run-mapdamage` enables it)
 - Unmapped FASTQ export is OFF by default (`--emit-unmapped-fastq` enables it)
 
+PlainMap records the effective configuration of each run in
+`SAMPLE.plainmap.run-config.tsv`. Reusing the same output directory and prefix requires
+an exact configuration match. Changing any parameter, normalized input/output path,
+manifest content, reference identity, PlainMap script, or tool command stops the run
+before preprocessing or mapping and reports the changed fields. Argument order and an
+explicit default versus an omitted default do not cause a mismatch. Use `--reset` to
+intentionally discard the previous run and accept a new configuration.
+
+Runs created by older PlainMap versions do not have a configuration file and cannot be
+safely resumed. Use `--reset`, or select a new prefix, for the first run with configuration
+tracking.
+
 ### Mapping modes
 
 - `modern`: maps unmerged paired-end reads as paired-end with `bwa mem`, and maps SE-like reads as single-end.
@@ -213,7 +225,7 @@ Optional parameters:
 | `--no-delete-as-you-go` | off | Keep chunk/mapchunk FASTQs until cleanup. |
 | `--dry-run` | off | Validate settings and print planned workflow only. |
 | `--validate` | off | Validate tools and gzip integrity of manifest FASTQs, then exit. |
-| `--reset` | off | Clear prior outputs/checkpoints for this sample and restart from scratch. |
+| `--reset` | off | Clear prior outputs/checkpoints and the recorded configuration, then restart using the current settings. |
 
 Tool override parameters:
 
@@ -291,6 +303,8 @@ Export unmapped reads as FASTQ:
       --emit-unmapped-fastq
 
 `--emit-unmapped-fastq` does not change final BAM filtering or summary statistics.
+It must be included in the initial command because all parameters must remain unchanged
+when resuming. To enable it for an existing prefix, restart with `--reset`.
 
 ---
 
@@ -302,6 +316,7 @@ Main outputs:
 - SAMPLE.final.RG.bam.bai
 - SAMPLE.plainmap.stats.tsv
 - SAMPLE.plainmap.coverage.tsv
+- SAMPLE.plainmap.run-config.tsv
 - SAMPLE_plainmap.log
 
 Optional outputs:
