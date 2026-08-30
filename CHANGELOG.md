@@ -31,3 +31,4 @@ Initial public release.
 - Added retry logic around merged BAM validation.
 - Added strict resume configuration tracking. PlainMap now refuses to reuse outputs or checkpoints if any effective parameter, input identity, script, or tool command has changed, and reports the differences.
 - Added the exact duplicate-fragment count to summary statistics for reproducibility checks.
+- Directed fastp HTML reports to the sample report directory instead of the launch directory.

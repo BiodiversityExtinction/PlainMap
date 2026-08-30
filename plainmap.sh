@@ -1094,12 +1094,13 @@ run_fastp_and_pool() {
     RAW_R2_READS=$(py_add "$RAW_R2_READS" "$take_pairs")
     RAW_FRAGMENTS=$(py_add "$RAW_FRAGMENTS" "$take_pairs")
 
-    local tag fastp_err fp_json trim1 trim2 merged up1 up2
+    local tag fastp_err fp_json fp_html trim1 trim2 merged up1 up2
     tag="$(basename "${r1c%.fastq.gz}")"
     tag="${tag//\//_}"
 
     fastp_err="$TMP/fastp_${SAMPLE}.${tag}.stderr.log"
     fp_json="$REPORTS/${SAMPLE}.${tag}.fastp.json"
+    fp_html="$REPORTS/${SAMPLE}.${tag}.fastp.html"
 
     trim1="$TMP/${SAMPLE}.${tag}.trim.R1.fastq.gz"
     trim2="$TMP/${SAMPLE}.${tag}.trim.R2.fastq.gz"
@@ -1117,7 +1118,7 @@ run_fastp_and_pool() {
       --out1 "$trim1" --out2 "$trim2" \
       -m --merged_out "$merged" \
       --unpaired1 "$up1" --unpaired2 "$up2" \
-      -j "$fp_json"
+      -j "$fp_json" --html "$fp_html"
 
     file_nonempty "$trim1" || die "fastp produced empty trimmed R1 for $tag"
     file_nonempty "$trim2" || die "fastp produced empty trimmed R2 for $tag"
@@ -1200,17 +1201,18 @@ run_fastp_and_pool() {
     RAW_R1_READS=$(py_add "$RAW_R1_READS" "$take_reads")
     RAW_FRAGMENTS=$(py_add "$RAW_FRAGMENTS" "$take_reads")
 
-    local tag fastp_err fp_json trim_se
+    local tag fastp_err fp_json fp_html trim_se
     tag="$(basename "${sec%.fastq.gz}")"
     tag="${tag//\//_}"
 
     fastp_err="$TMP/fastp_${SAMPLE}.${tag}.stderr.log"
     fp_json="$REPORTS/${SAMPLE}.${tag}.fastp.json"
+    fp_html="$REPORTS/${SAMPLE}.${tag}.fastp.html"
     trim_se="$TMP/${SAMPLE}.${tag}.trim.SE.fastq.gz"
 
     run_fastp "$fastp_err" "${FASTP_ARGS[@]}" \
       -i "$in_se" --out1 "$trim_se" \
-      -j "$fp_json"
+      -j "$fp_json" --html "$fp_html"
 
     file_nonempty "$trim_se" || die "fastp produced empty trimmed SE for $tag"
     cat "$trim_se" >> "$POOL_SE_ALL"
