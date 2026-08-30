@@ -4,7 +4,7 @@ All notable changes to PlainMap will be documented here.
 
 ## v0.1.0 - 2026-07-07
 
-Initial JOSS-preparation release.
+Initial public release.
 
 ### Added
 
@@ -18,7 +18,7 @@ Initial JOSS-preparation release.
 - Optional mapDamage integration.
 - Fragment-aware summary statistics.
 - Toy example dataset for smoke testing.
-- JOSS paper, bibliography, workflow figure, citation metadata, and MIT license.
+- Workflow figure, citation metadata, and MIT license.
 
 ### Changed
 

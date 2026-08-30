@@ -137,7 +137,7 @@ In this case:
 
 ## Pipeline Overview
 
-![PlainMap workflow overview](paper/figure1.png)
+![PlainMap workflow overview](docs/figure1.png)
 
 *Figure 1. PlainMap workflow from heterogeneous FASTQ input through header-based pairing inference, optional pre-trimming pilot subsampling and adaptive chunking, fastp preprocessing, mode-specific mapping, BAM processing, and summary statistics. Optional outputs include mapDamage analyses and FASTQ files containing unmapped reads.*
 
@@ -353,7 +353,7 @@ Issues, feedback, and pull requests are welcome.
 
 ## Citation
 
-If you use PlainMap, please cite the repository metadata in [CITATION.cff](CITATION.cff). A JOSS submission manuscript is provided in [paper/paper.md](paper/paper.md).
+If you use PlainMap, please cite the repository metadata in [CITATION.cff](CITATION.cff).
 
 ## Contributing
 

@@ -198,10 +198,19 @@ print(os.path.realpath(os.path.abspath(p)))
 PY
 }
 
+resolve_abs_path() {
+  "$PYTHON" - "$1" <<'PY'
+import os,sys
+p=sys.argv[1]
+p=os.path.expanduser(p)
+print(os.path.abspath(p))
+PY
+}
+
 mkdir -p "$OUT"
 MANIFEST="$(resolve_path "$MANIFEST")"
 REF="$(resolve_path "$REF")"
-OUT="$(resolve_path "$OUT")"
+OUT="$(resolve_abs_path "$OUT")"
 MANIFEST_DIR="$(dirname "$MANIFEST")"
 
 ###############################################################################
