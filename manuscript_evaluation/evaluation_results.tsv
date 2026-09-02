@@ -1,0 +1,6 @@
+run_condition	library_type	max_reads_per_chunk	mapping_chunks	chunks_reused	raw_fragments	trimmed_fragments	merged_reads	unpaired_reads	mapped_reads_unique	mapped_fragments_unique	duplicate_fragments	endog_percent	duprate_percent	avg_readlen	mapped_bp	avg_depth	pct_covered	wall_minutes	max_rss_gb	bam_quickcheck	final_unmapped_records	final_duplicate_records
+unchunked_baseline	modern	0	NA	NA	3000000	2998357	1650887	4524	12987	9959	565	0.3320	5.3687	137.60	1786972	0.000413	0.036408	6.67	5.77	PASS	0	0
+unchunked_mode_evaluation	ancient-fast	0	NA	NA	3000000	2998357	1650887	4524	4605	4605	206	0.1535	4.2819	106.52	490529	0.000204	0.020263	7.75	4.73	PASS	0	0
+unchunked_mode_evaluation	ancient-all	0	NA	NA	3000000	2998357	1650887	4524	4818	4731	213	0.1577	4.3083	108.35	522008	0.000216	0.021467	9.42	4.74	PASS	0	0
+chunked_uninterrupted	modern	100000	31	0	3000000	2998293	1650827	4460	12900	9916	561	0.3305	5.3546	137.47	1773414	0.000412	0.036362	23.23	4.32	PASS	0	0
+chunked_resumed_after_SIGTERM	modern	100000	31	1	3000000	2998293	1650827	4460	12900	9916	561	0.3305	5.3546	137.47	1773414	0.000412	0.036362	2.63	4.32	PASS	0	0

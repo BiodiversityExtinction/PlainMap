@@ -345,6 +345,14 @@ Reported fields include:
 
 ---
 
+## Evaluation
+
+The manifest, parameterized commands, restart/chunking protocol, provenance details, and
+reported result tables used for the manuscript evaluation are available in
+[`manuscript_evaluation/`](manuscript_evaluation/).
+
+---
+
 ## Limitations (v0.1.0)
 
 - Single read group per sample

@@ -1,0 +1,5 @@
+logs/
+results/
+validation/
+evaluation_runs/
+*.resolved.txt
