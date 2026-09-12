@@ -44,7 +44,7 @@ Current version: **v0.1.0**
 - **Disk-space friendly mode:** optionally deletes chunk/mapchunk FASTQs as soon as they are safe to remove
 - Automatic use of pigz if available
 - Fragment-aware duplication rate derived from samtools markdup
-- Optional mapDamage for any library type
+- Optional mapDamage for any library type, automatically parallelized by contig when `--threads` > 1
 - Optional export of unmapped reads as FASTQ (`samtools fastq`)
 
 ---
@@ -214,7 +214,8 @@ Optional parameters:
 | `--adapter-r1 SEQ` | auto | Explicit adapter for read 1. |
 | `--adapter-r2 SEQ` | auto | Explicit adapter for read 2. |
 | `--trim-only` | off | Run trimming/pooling and exit before mapping. |
-| `--run-mapdamage` | off | Run mapDamage on final BAM. |
+| `--run-mapdamage` | off | Run mapDamage on final BAM. With `--threads` > 1 and more than one contig has mapped reads, the BAM is split by whole contig and scanned by mapDamage in parallel, then results are merged before final plotting; mapDamage itself is never modified, and the count tables are numerically equivalent to a single-process run. |
+| `--mapdamage-serial` | off | Force the original single-process mapDamage behavior even when `--threads` > 1. |
 | `--tmpdir DIR` | auto | Custom temp/scratch directory. |
 | `--keep-intermediate` | off | Keep `<outdir>/<prefix>/work` after successful completion. |
 | `--no-resume` | off | Disable checkpoint resume behavior. |

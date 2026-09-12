@@ -18,6 +18,11 @@ gzip -t "$REPO_ROOT/example/reads_R1.fastq.gz" "$REPO_ROOT/example/reads_R2.fast
 
 cp "$REPO_ROOT/example/reference.fa" "$TMP_ROOT/reference.fa"
 
+# Add a second, unrelated contig and a matching SE read so the mapDamage test
+# exercises the real parallel split/merge path rather than its serial fallback.
+chr2_seq="TTGACCATGATCCGTTACGAGGCTAACCTGATGCGTTCAGATCCAGTACGTTGACCTAGGATCCGTAGACCTTGCATGGTACCTGAGTTCGATACCGTTCAGGATGCTAACGTAGCTTGACGGTACAGTCCGATGATCCTGAC"
+printf '>toy_chr2\n%s\n' "$chr2_seq" >> "$TMP_ROOT/reference.fa"
+
 # SRA paired files commonly carry the same read name in both mates. Retain the
 # toy sequences while replacing both mate headers with identical SRA-style names.
 for mate in R1 R2; do
@@ -30,10 +35,15 @@ gzip -dc "$REPO_ROOT/example/reads_R1.fastq.gz" \
   | awk 'NR <= 4 {if (NR == 1) print "@SETEST.1 length=52"; else print}' \
   | gzip -c > "$TMP_ROOT/single_end.fastq.gz"
 
+quality52=$(printf '%*s' 52 '' | tr ' ' I)
+printf '@SETEST.2 length=52\n%s\n+\n%s\n' "${chr2_seq:0:52}" "$quality52" \
+  | gzip -c > "$TMP_ROOT/single_end_chr2.fastq.gz"
+
 cat > "$TMP_ROOT/manifest.txt" <<'EOF'
 sra_R1.fastq.gz
 sra_R2.fastq.gz
 single_end.fastq.gz
+single_end_chr2.fastq.gz
 EOF
 
 cd "$TMP_ROOT"
@@ -205,6 +215,58 @@ grep -F "already mapped (valid BAM exists) -> skipping" \
   "$chunk_out/equivalence_plainmap.log" >/dev/null
 [[ "$chunk_checksum" == "$(alignment_checksum "$chunk_out/equivalence.final.RG.bam")" ]]
 validate_outputs equivalence modern "$chunk_out"
+
+if command -v mapDamage >/dev/null 2>&1; then
+  echo "Testing optional mapDamage integration (serial and parallel results agree)"
+  md_serial_out="$TMP_ROOT/mapdamage/serial"
+  md_auto_out="$TMP_ROOT/mapdamage/auto"
+
+  # Shared references are often read-only. An existing index must be reused,
+  # not rebuilt by the parallel implementation.
+  samtools faidx "$TMP_ROOT/reference.fa"
+  chmod a-w "$TMP_ROOT/reference.fa" "$TMP_ROOT/reference.fa.fai"
+
+  run_plainmap md modern "$md_serial_out" --run-mapdamage --mapdamage-serial --keep-intermediate
+  run_plainmap md modern "$md_auto_out" --run-mapdamage --threads 2 --keep-intermediate
+  grep -F "splitting 2 contig(s) into 2 parallel chunk(s)" "$md_auto_out/md_plainmap.log" >/dev/null
+
+  for out in "$md_serial_out" "$md_auto_out"; do
+    for f in misincorporation.txt dnacomp.txt lgdistribution.txt; do
+      test -s "$out/md_mapdamage/$f"
+    done
+    if command -v Rscript >/dev/null 2>&1; then
+      for f in Fragmisincorporation_plot.pdf Length_plot.pdf 5pCtoT_freq.txt 3pGtoA_freq.txt; do
+        test -s "$out/md_mapdamage/$f"
+      done
+    fi
+  done
+
+  # Comments and row order may differ after merging, so compare table schemas
+  # and complete row multisets rather than requiring byte-identical files.
+  python3 - "$md_serial_out/md_mapdamage" "$md_auto_out/md_mapdamage" <<'PY'
+import sys
+
+def read_table(path):
+    with open(path) as handle:
+        lines = [line.rstrip("\n") for line in handle if line.strip() and not line.startswith("#")]
+    return lines[0], sorted(lines[1:])
+
+serial_dir, parallel_dir = sys.argv[1:]
+for name in ("misincorporation.txt", "dnacomp.txt", "lgdistribution.txt"):
+    serial = read_table(f"{serial_dir}/{name}")
+    parallel = read_table(f"{parallel_dir}/{name}")
+    assert serial == parallel, name
+PY
+
+  # A stale top-level checkpoint must not hide missing final output. Complete
+  # chunk outputs should be reused to reconstruct only the merged result.
+  mv "$md_auto_out/md_mapdamage/dnacomp.txt" "$md_auto_out/md_mapdamage/dnacomp.txt.missing"
+  run_plainmap md modern "$md_auto_out" --run-mapdamage --threads 2 --keep-intermediate
+  grep -F "checkpoint is present but outputs are incomplete" "$md_auto_out/md_plainmap.log" >/dev/null
+  test -s "$md_auto_out/md_mapdamage/dnacomp.txt"
+else
+  echo "Skipping mapDamage tests (mapDamage not found in PATH)"
+fi
 
 echo "Testing corrupt FASTQ validation failure"
 cp "$TMP_ROOT/sra_R1.fastq.gz" "$TMP_ROOT/corrupt.fastq.gz"

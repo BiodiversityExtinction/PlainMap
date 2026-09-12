@@ -56,6 +56,9 @@ TRIM_ONLY=0
 
 # mapDamage toggle (default OFF for all library types)
 RUN_MAPDAMAGE=0
+# When RUN_MAPDAMAGE=1 and --threads > 1, mapDamage is split by whole contig and
+# run in parallel, then merged; set to 1 to force the old single-process behavior.
+MAPDAMAGE_SERIAL=0
 
 DRYRUN=0
 VALIDATE_ONLY=0
@@ -101,6 +104,7 @@ Optional:
   --adapter-r2 SEQ
   --trim-only                                Trim only (fastp); exit before mapping
   --run-mapdamage                            Run mapDamage (any library type; default OFF)
+  --mapdamage-serial                         Disable automatic contig-split mapDamage parallelization
   --tmpdir DIR                               Custom temp dir (e.g. node-local scratch)
   --keep-intermediate                        Keep <outdir>/<prefix>/work
   --no-resume                                Disable resume (default is resume ON)
@@ -162,6 +166,7 @@ while [[ $# -gt 0 ]]; do
     --trim-only) TRIM_ONLY=1; shift ;;
     --run-mapdamage) RUN_MAPDAMAGE=1; shift ;;
     --no-mapdamage) RUN_MAPDAMAGE=0; shift ;;                  # backward-compatible no-op
+    --mapdamage-serial) MAPDAMAGE_SERIAL=1; shift ;;
     --tmpdir) need_arg "$1" "${2-}"; TMPDIR_USER="$2"; shift 2 ;;
     --keep-intermediate) KEEP_INTERMEDIATE=1; shift ;;
     --resume) RESUME=1; shift ;;
@@ -246,6 +251,7 @@ CHUNKS="$WORK/chunks"          # pre-fastp chunks
 TMPBASE="$WORK/tmp"
 MAPCHUNKS="$WORK/mapchunks"    # post-fastp mapping chunks
 BAMS="$WORK/bams"
+MDCHUNKS="$WORK/mapdamage_chunks"
 UNMAPPED="$WORK/unmapped"
 FINAL="$WORK/final"
 CKPT="$WORK/.checkpoints"
@@ -269,7 +275,7 @@ else
   TMP="$TMPBASE"
 fi
 
-mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
+mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$MDCHUNKS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
 
 ###############################################################################
 # COMPRESSION HELPERS (pigz if available)
@@ -358,7 +364,7 @@ if [[ $RESET -eq 1 ]]; then
         "$STATS" "$COV_TSV" "$RUN_CONFIG" \
         "$UNMAPPED_R1_FQ" "$UNMAPPED_R2_FQ" "$UNMAPPED_SE_FQ" 2>/dev/null || true
   rm -f "$CKPT/${SAMPLE}."*.done "$RAW_META" "$PE_IDLIST" "$SE_IDLIST" 2>/dev/null || true
-  mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
+  mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$MDCHUNKS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
 fi
 
 ###############################################################################
@@ -485,6 +491,7 @@ write_run_config() {
     printf 'adapter_r2\t%s\n' "${ADAPTER_R2:-<auto>}"
     printf 'trim_only\t%s\n' "$TRIM_ONLY"
     printf 'run_mapdamage\t%s\n' "$RUN_MAPDAMAGE"
+    printf 'mapdamage_serial\t%s\n' "$MAPDAMAGE_SERIAL"
     printf 'tmpdir\t%s\n' "${TMPDIR_USER:-<default>}"
     printf 'keep_intermediate\t%s\n' "$KEEP_INTERMEDIATE"
     printf 'resume\t%s\n' "$RESUME"
@@ -572,6 +579,7 @@ log_run_configuration() {
   log "  max_reads_per_chunk: $MAX_READS_PER_CHUNK"
   log "  emit_unmapped_fastq: $EMIT_UNMAPPED_FASTQ"
   log "  run_mapdamage:       $RUN_MAPDAMAGE"
+  log "  mapdamage_serial:    $MAPDAMAGE_SERIAL"
   log "  resume:              $RESUME"
   log "  delete_as_you_go:    $DELETE_AS_YOU_GO"
   log "  keep_intermediate:   $KEEP_INTERMEDIATE"
@@ -1731,15 +1739,295 @@ else
 fi
 
 ###############################################################################
-# OPTIONAL: mapDamage
+# OPTIONAL: mapDamage (parallelized by whole-contig BAM splitting)
 ###############################################################################
+# mapDamage2 itself is single-threaded and, unmodified, scans the whole BAM in
+# one pass. Its scan produces plain per-contig count tables (misincorporation,
+# base composition, fragment-length) with no cross-read state, and (run with
+# --no-stats, as PlainMap already does) its plotting stage never rescans the
+# BAM -- it only reads those table files back in. That means the scan can be
+# split by whole contig (never by sub-contig region, which risks double-
+# counting a read that spans a split boundary), run in parallel, and the
+# resulting tables merged by summing matching rows before a final, unmodified
+# mapDamage --plot-only call regenerates the usual output. mapDamage's own
+# code is never modified; only how PlainMap invokes it changes.
+MAPDAMAGE_OUT="$OUT/${SAMPLE}_mapdamage"
+
+mapdamage_tables_ok() {
+  local dir="$1" table
+  for table in misincorporation.txt dnacomp.txt lgdistribution.txt; do
+    file_nonempty "$dir/$table" || return 1
+  done
+}
+
+mapdamage_has_length_data() {
+  local table="$1"
+  awk '
+    /^#/ || NF == 0 {next}
+    !header_seen {header_seen=1; next}
+    {found=1; exit}
+    END {exit(found ? 0 : 1)}
+  ' "$table"
+}
+
+mapdamage_plots_ok() {
+  local dir="$1"
+  file_nonempty "$dir/Fragmisincorporation_plot.pdf" || return 1
+  file_nonempty "$dir/5pCtoT_freq.txt" || return 1
+  file_nonempty "$dir/3pGtoA_freq.txt" || return 1
+  if mapdamage_has_length_data "$dir/lgdistribution.txt"; then
+    file_nonempty "$dir/Length_plot.pdf" || return 1
+  fi
+}
+
+mapdamage_results_ok() {
+  local dir="$1"
+  mapdamage_tables_ok "$dir" || return 1
+  command -v Rscript >/dev/null 2>&1 || return 0
+  mapdamage_plots_ok "$dir"
+}
+
+validate_mapdamage_results() {
+  local dir="$1"
+  mapdamage_tables_ok "$dir" || die "mapDamage result tables are missing or empty: $dir"
+  if command -v Rscript >/dev/null 2>&1; then
+    mapdamage_plots_ok "$dir" || die "mapDamage plots are missing or empty despite Rscript being available: $dir"
+  fi
+}
+
+run_mapdamage_single() {
+  rm -rf "$MAPDAMAGE_OUT"
+  "$MAPDAMAGE" -i "$OUT_BAM" --merge-reference-sequences --no-stats -r "$REF" -d "$MAPDAMAGE_OUT"
+  validate_mapdamage_results "$MAPDAMAGE_OUT"
+}
+
+mapdamage_chunk_worker() {
+  local idx="$1" regions_file="$2"
+  local step="mapdamage_chunk_${idx}"
+  local chunk_bam="$MDCHUNKS/${SAMPLE}.chunk${idx}.bam"
+  local chunk_dir="$MDCHUNKS/${SAMPLE}.chunk${idx}.results"
+
+  if ckpt_ok "$step" "$chunk_dir/misincorporation.txt" "$chunk_dir/dnacomp.txt" "$chunk_dir/lgdistribution.txt"; then
+    log "  mapDamage chunk ${idx}: already complete (checkpoint present) -> skipping"
+    return 0
+  fi
+  ckpt_clear "$step"
+
+  local nregions
+  nregions=$(awk 'END {print NR + 0}' "$regions_file")
+  [[ "$nregions" -gt 0 ]] || die "mapDamage chunk ${idx}: empty region list"
+
+  log "  mapDamage chunk ${idx}: extracting $nregions contig(s)"
+  "$SAMTOOLS" view -b -M -L "$regions_file" -o "${chunk_bam}.tmp" "$OUT_BAM"
+  bam_ok "${chunk_bam}.tmp" || die "mapDamage chunk ${idx}: extracted BAM invalid"
+  mv -f "${chunk_bam}.tmp" "$chunk_bam"
+
+  rm -rf "$chunk_dir"
+  log "  mapDamage chunk ${idx}: scanning"
+  "$MAPDAMAGE" -i "$chunk_bam" --merge-reference-sequences --no-stats --no-plot -r "$REF" -d "$chunk_dir"
+
+  file_nonempty "$chunk_dir/misincorporation.txt" || die "mapDamage chunk ${idx}: missing misincorporation.txt"
+  file_nonempty "$chunk_dir/dnacomp.txt"          || die "mapDamage chunk ${idx}: missing dnacomp.txt"
+  file_nonempty "$chunk_dir/lgdistribution.txt"   || die "mapDamage chunk ${idx}: missing lgdistribution.txt"
+
+  if [[ $DELETE_AS_YOU_GO -eq 1 ]]; then
+    rm -f "$chunk_bam"
+  fi
+
+  ckpt_mark "$step" || true
+}
+
+# Sums matching rows across chunk result tables (each chunk already ran with
+# --merge-reference-sequences, so misincorporation.txt/dnacomp.txt rows are all
+# keyed "Chr=*"; lgdistribution.txt is keyed by strand+length). Column layout
+# matches what mapdamage/tables.py writes.
+merge_mapdamage_chunk_tables() {
+  local outdir="$1"; shift
+  mkdir -p "$outdir"
+  "$PYTHON" - "$outdir" "$@" <<'PY'
+import sys, os
+
+def read_data(path):
+    header, rows = None, []
+    with open(path) as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            if header is None:
+                header = line
+                continue
+            rows.append((lineno, line.split("\t")))
+    return header, rows
+
+def merge(files, key_idxs, sum_start):
+    header, sums, order, ncols = None, {}, [], None
+    for f in files:
+        h, rows = read_data(f)
+        if h is None:
+            raise ValueError("missing table header in %s" % f)
+        if header is None:
+            header = h
+            ncols = len(h.split("\t"))
+        elif h != header:
+            raise ValueError("table header differs in %s" % f)
+        for lineno, cols in rows:
+            if len(cols) != ncols:
+                raise ValueError("expected %d columns in %s:%d, found %d" %
+                                 (ncols, f, lineno, len(cols)))
+            key = tuple(cols[i] for i in key_idxs)
+            if key not in sums:
+                sums[key] = [0] * (ncols - sum_start)
+                order.append(key)
+            for j in range(sum_start, ncols):
+                try:
+                    sums[key][j - sum_start] += int(cols[j])
+                except ValueError as exc:
+                    raise ValueError("non-integer count in %s:%d" % (f, lineno)) from exc
+    return header, sums, order, ncols
+
+def sort_key(k):
+    return [(0, int(v)) if v.lstrip("-").isdigit() else (1, v) for v in k]
+
+def write_out(path, comments, header, key_idxs, const0, ncols, sums, order):
+    with open(path, "w") as out:
+        for c in comments:
+            out.write(c + "\n")
+        out.write(header + "\n")
+        for key in sorted(order, key=sort_key):
+            row = [""] * ncols
+            if const0 is not None:
+                row[0] = const0
+            for pos, idx in enumerate(key_idxs):
+                row[idx] = key[pos]
+            sum_start = max(key_idxs) + 1 if const0 is None else 4
+            for j in range(sum_start, ncols):
+                row[j] = str(sums[key][j - sum_start])
+            out.write("\t".join(row) + "\n")
+
+outdir, chunk_dirs = sys.argv[1], sys.argv[2:]
+
+for fname in ("misincorporation.txt", "dnacomp.txt"):
+    files = [os.path.join(d, fname) for d in chunk_dirs]
+    missing = [f for f in files if not os.path.isfile(f)]
+    if missing:
+        sys.exit("missing chunk table(s): %s" % ", ".join(missing))
+    header, sums, order, ncols = merge(files, key_idxs=[1, 2, 3], sum_start=4)
+    write_out(os.path.join(outdir, fname),
+              ["# table produced by PlainMap (merged from %d parallel mapDamage chunks)" % len(files),
+               "# Chr: reference from sam/bam header, End: from which termini of DNA sequences, Std: strand of reads"],
+              header, [1, 2, 3], "*", ncols, sums, order)
+
+fname = "lgdistribution.txt"
+files = [os.path.join(d, fname) for d in chunk_dirs]
+missing = [f for f in files if not os.path.isfile(f)]
+if missing:
+    sys.exit("missing chunk table(s): %s" % ", ".join(missing))
+header, sums, order, ncols = merge(files, key_idxs=[0, 1], sum_start=2)
+write_out(os.path.join(outdir, fname),
+          ["# table produced by PlainMap (merged from %d parallel mapDamage chunks)" % len(files)],
+          header, [0, 1], None, ncols, sums, order)
+PY
+}
+
+run_mapdamage_parallel() {
+  mkdir -p "$MDCHUNKS"
+
+  # Avoid a race between workers creating a missing index, but do not rewrite an
+  # existing index: references are commonly shared from read-only directories.
+  if ! file_nonempty "${REF}.fai"; then
+    log "  mapDamage: creating missing FASTA index"
+    "$SAMTOOLS" faidx "$REF"
+  fi
+
+  local contig_stats="$MDCHUNKS/${SAMPLE}.contig_stats.tsv"
+  "$SAMTOOLS" idxstats "$OUT_BAM" \
+    | awk -F'\t' '$1!="*" && $3>0 {print $1"\t"$2"\t"$3}' > "$contig_stats"
+
+  local ncontigs
+  ncontigs=$(awk 'END {print NR + 0}' "$contig_stats")
+
+  if [[ "$MAPDAMAGE_SERIAL" -eq 1 || "$THREADS" -le 1 || "$ncontigs" -le 1 ]]; then
+    log "  mapDamage: serial mode (threads=$THREADS, contigs-with-reads=$ncontigs, serial-flag=$MAPDAMAGE_SERIAL)"
+    run_mapdamage_single
+    return
+  fi
+
+  local n=$(( THREADS < ncontigs ? THREADS : ncontigs ))
+  log "  mapDamage: splitting $ncontigs contig(s) into $n parallel chunk(s)"
+
+  local bin_prefix="$MDCHUNKS/${SAMPLE}.bin"
+  rm -f "${bin_prefix}."*.bed
+
+  # This reads the statistics from a file, not piped stdin: "python3 -"
+  # already uses stdin to receive this heredoc as the script's own source, so
+  # piping data into the same invocation would silently starve sys.stdin.
+  "$PYTHON" - "$n" "$bin_prefix" "$contig_stats" <<'PY'
+import sys
+n, prefix, contig_stats = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+contigs = []
+with open(contig_stats) as fh:
+    for line in fh:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        name, length, reads = line.split("\t")
+        contigs.append((name, int(length), int(reads)))
+contigs.sort(key=lambda x: x[2], reverse=True)
+bins = [[] for _ in range(n)]
+loads = [0] * n
+for name, length, reads in contigs:
+    i = min(range(n), key=lambda j: loads[j])
+    bins[i].append((name, length))
+    loads[i] += reads
+for i, entries in enumerate(bins):
+    with open("%s.%d.bed" % (prefix, i), "w") as fh:
+        for name, length in entries:
+            fh.write("%s\t0\t%d\n" % (name, length))
+PY
+
+  local pids=() idx
+  for (( idx=0; idx<n; idx++ )); do
+    local regions="${bin_prefix}.${idx}.bed"
+    [[ -s "$regions" ]] || die "mapDamage: expected region bin file missing/empty: $regions"
+    ( mapdamage_chunk_worker "$idx" "$regions" ) &
+    pids+=( "$!" )
+  done
+
+  local fail=0 p
+  for p in "${pids[@]}"; do
+    wait "$p" || fail=1
+  done
+  [[ "$fail" -eq 0 ]] || die "mapDamage: one or more parallel chunks failed (see log above for which)"
+
+  local chunk_dirs=()
+  for (( idx=0; idx<n; idx++ )); do
+    chunk_dirs+=( "$MDCHUNKS/${SAMPLE}.chunk${idx}.results" )
+  done
+
+  log "  mapDamage: merging $n chunk result table(s)"
+  rm -rf "$MAPDAMAGE_OUT"
+  merge_mapdamage_chunk_tables "$MAPDAMAGE_OUT" "${chunk_dirs[@]}"
+
+  if command -v Rscript >/dev/null 2>&1; then
+    log "  mapDamage: generating final plots from merged tables"
+    "$MAPDAMAGE" --plot-only -d "$MAPDAMAGE_OUT" --title "${SAMPLE}.final.RG"
+  else
+    log "WARNING: Rscript not found; mapDamage tables were generated but plotting was skipped"
+  fi
+  validate_mapdamage_results "$MAPDAMAGE_OUT"
+}
+
 if [[ "$RUN_MAPDAMAGE" -eq 1 ]]; then
-  if [[ $RESUME -eq 1 && -f "$(ckpt_file mapdamage)" ]]; then
+  if [[ $RESUME -eq 1 && -f "$(ckpt_file mapdamage)" ]] && mapdamage_results_ok "$MAPDAMAGE_OUT"; then
     log "STEP: mapDamage (skipped; checkpoint present)"
   else
+    if [[ $RESUME -eq 1 && -f "$(ckpt_file mapdamage)" ]]; then
+      log "STEP: mapDamage checkpoint is present but outputs are incomplete; rerunning"
+    fi
     log "STEP: mapDamage"
     ckpt_clear mapdamage
-    "$MAPDAMAGE" -i "$OUT_BAM" --merge-reference-sequences --no-stats -r "$REF" -d "$OUT/${SAMPLE}_mapdamage"
+    run_mapdamage_parallel
     ckpt_mark mapdamage
   fi
 fi

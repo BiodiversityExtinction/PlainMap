@@ -2,6 +2,12 @@
 
 All notable changes to PlainMap will be documented here.
 
+## Unreleased
+
+### Added
+
+- mapDamage is now automatically parallelized by splitting the final BAM by whole contig when `--threads` > 1 and more than one contig has mapped reads, running independent mapDamage scans in parallel and merging the resulting tables before a final plotting pass. mapDamage's own code is never modified, and the merged count tables are numerically equivalent to a single-process run. Added `--mapdamage-serial` to force the original single-process behavior.
+
 ## v0.1.0 - 2026-07-07
 
 Initial public release.
