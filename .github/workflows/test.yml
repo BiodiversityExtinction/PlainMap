@@ -15,7 +15,23 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y fastp bwa samtools
+          sudo apt-get install -y fastp bwa samtools default-jre-headless
+
+          dedup_jar="$RUNNER_TEMP/DeDup-0.12.9.jar"
+          curl --fail --location --retry 3 \
+            --output "$dedup_jar" \
+            https://github.com/apeltzer/DeDup/releases/download/0.12.9/DeDup-0.12.9.jar
+          echo "de3e921a3ab1f6494ec531be912fcf0f7c5b65546f5475ee2aad701cd08b0aad  $dedup_jar" \
+            | sha256sum --check --strict
+
+          sudo install -d /opt/dedup
+          sudo install -m 0644 "$dedup_jar" /opt/dedup/DeDup-0.12.9.jar
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'exec java -Xms512m -Xmx1g -jar /opt/dedup/DeDup-0.12.9.jar "$@"' \
+            | sudo tee /usr/local/bin/dedup >/dev/null
+          sudo chmod 0755 /usr/local/bin/dedup
+          dedup --version
 
       - name: Run smoke and regression tests
         run: bash tests/run_tests.sh
