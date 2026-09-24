@@ -2,11 +2,19 @@
 
 All notable changes to PlainMap will be documented here.
 
-## Unreleased
+## v0.2.0 - 2026-09-24
 
 ### Added
 
 - mapDamage is now automatically parallelized by splitting the final BAM by whole contig when `--threads` > 1 and more than one contig has mapped reads, running independent mapDamage scans in parallel and merging the resulting tables before a final plotting pass. mapDamage's own code is never modified, and the merged count tables are numerically equivalent to a single-process run. Added `--mapdamage-serial` to force the original single-process behavior.
+- Added DeDup as a required dependency and `--dedup CMD` as an executable-path override.
+- Added separate PE and SE-like pre/post-deduplication fragment counts, duplicate counts, duplication rates, and method fields to summary statistics.
+- Added persistent DeDup log, histogram, JSON, and stdout reports under `SAMPLE/dedup_reports/`.
+
+### Changed
+
+- Duplicate removal now uses DeDup with `--merged` for all SE-like alignments (merged, unpaired, and true SE) and samtools `fixmate + markdup` for unmerged PE alignments. These classes are deduplicated separately and recombined before downstream processing.
+- Updated the integration tests to exercise a known SE duplicate with the real DeDup interface and verify class-specific statistics.
 
 ## v0.1.0 - 2026-07-07
 

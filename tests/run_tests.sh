@@ -6,7 +6,9 @@ PLAINMAP="$REPO_ROOT/plainmap.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/plainmap-tests.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-for cmd in fastp bwa samtools python3 gzip sha256sum; do
+DEDUP_CMD="${DEDUP:-dedup}"
+
+for cmd in fastp bwa samtools "$DEDUP_CMD" python3 gzip sha256sum; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "ERROR: required test command not found: $cmd" >&2
     exit 1
@@ -32,7 +34,15 @@ for mate in R1 R2; do
 done
 
 gzip -dc "$REPO_ROOT/example/reads_R1.fastq.gz" \
-  | awk 'NR <= 4 {if (NR == 1) print "@SETEST.1 length=52"; else print}' \
+  | awk 'NR <= 4 {line[NR]=$0}
+         END {
+           for (copy=1; copy<=2; copy++) {
+             print "@SETEST." copy " length=52"
+             print line[2]
+             print "+"
+             print line[4]
+           }
+         }' \
   | gzip -c > "$TMP_ROOT/single_end.fastq.gz"
 
 quality52=$(printf '%*s' 52 '' | tr ' ' I)
@@ -135,6 +145,30 @@ assert math.isclose(float(row["endog"]), expected_endog, abs_tol=5.1e-7)
 assert math.isclose(float(row["duprate"]), expected_duprate, abs_tol=5.1e-7)
 assert float(row["avg_depth"]) >= 0
 assert 0 <= float(row["pct_covered"]) <= 100
+
+assert row["pe_dedup_method"] == "samtools-markdup"
+assert row["se_like_dedup_method"] == "DeDup"
+
+for prefix in ("pe", "se_like"):
+    all_fragments = int(row[f"{prefix}_fragments_all"])
+    unique_fragments = int(row[f"{prefix}_fragments_unique"])
+    duplicate_fragments = int(row[f"{prefix}_duplicate_fragments"])
+    duplicate_rate = float(row[f"{prefix}_duprate"])
+    assert unique_fragments == all_fragments - duplicate_fragments
+    expected_rate = 0.0 if all_fragments == 0 else duplicate_fragments / all_fragments
+    assert math.isclose(duplicate_rate, expected_rate, abs_tol=5.1e-7)
+
+assert int(row["mapped_fragments_all"]) == (
+    int(row["pe_fragments_all"]) + int(row["se_like_fragments_all"])
+)
+assert int(row["duplicate_fragments"]) == (
+    int(row["pe_duplicate_fragments"]) + int(row["se_like_duplicate_fragments"])
+)
+assert int(row["se_like_duplicate_fragments"]) >= 1
+if row["library_type"] == "ancient-fast":
+    assert int(row["pe_fragments_all"]) == 0
+else:
+    assert int(row["pe_fragments_all"]) > 0
 PY
 }
 
@@ -196,6 +230,17 @@ base.pop("max_reads_per_chunk")
 chunked.pop("max_reads_per_chunk")
 assert base == chunked, (base, chunked)
 PY
+
+echo "Testing recovery of a missing persistent DeDup report"
+dedup_json="$chunk_out/equivalence/dedup_reports/equivalence.se_like.coordsort.dedup.json"
+rm -f "$dedup_json"
+run_plainmap equivalence modern "$chunk_out" --max-reads-per-chunk 1 --keep-intermediate
+test -s "$dedup_json"
+if grep -F "class-specific dedup (skipped; checkpoint present)" \
+    "$chunk_out/equivalence_plainmap.log" >/dev/null; then
+  echo "ERROR: dedup checkpoint was reused despite a missing DeDup report" >&2
+  exit 1
+fi
 
 echo "Testing reuse of completed mapping chunks during downstream recovery"
 checkpoint_dir="$chunk_out/equivalence/work/.checkpoints"

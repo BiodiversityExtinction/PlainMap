@@ -10,7 +10,7 @@ Please open a GitHub Issue and include:
 - the PlainMap log file, or the relevant error section
 - the `plainmap.sh --help` version if available
 - operating system or cluster environment
-- versions of `fastp`, `bwa`, `samtools`, and `bash`
+- versions of `fastp`, `bwa`, `samtools`, `dedup`, and `bash`
 - whether the input is single-end, paired-end, mixed, or SRA-export FASTQ
 - a minimal reproducible example if possible
 
@@ -36,9 +36,11 @@ Before opening a pull request:
 bash tests/run_tests.sh
 ```
 
-The suite generates a temporary mixed SRA-style PE/SE dataset and exercises all mapping
+The suite requires DeDup and generates a temporary mixed SRA-style PE/SE dataset with a
+known SE duplicate. It exercises all mapping
 modes, resume configuration checks, forced chunking equivalence, checkpoint reuse, BAM
-invariants, summary-statistic formulas, and corrupt FASTQ handling.
+invariants, class-specific duplicate handling, summary-statistic formulas, and corrupt
+FASTQ handling.
 
 If your change affects outputs, please describe the expected behavior change and update the README or example documentation where relevant.
 

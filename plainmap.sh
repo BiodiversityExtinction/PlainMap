@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PlainMap v0.1.0
+# PlainMap v0.2.0
 # Lightweight, restartable mapping pipeline for ancient-fast, ancient-all, and modern DNA
 #
 # Key properties (current dev version):
@@ -18,7 +18,7 @@
 #     * per-chunk resume (won't remap already-produced valid BAMs)
 #     * chunk ID lists persisted, so resume works even if mapchunk FASTQs were deleted
 # - pigz is used automatically if available (decompress/test/compress)
-# - fragment-aware stats + duplication rate derived from duplicate flags (samtools markdup)
+# - fragment-aware duplicate removal: DeDup for SE-like reads, samtools markdup for PE
 # - disk-space friendly: can delete chunk FASTQs and mapchunk FASTQs as soon as safe
 #
 # Library types:
@@ -39,7 +39,7 @@ fi
 ###############################################################################
 # DEFAULTS
 ###############################################################################
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 THREADS=1
 MINLEN=30
@@ -70,6 +70,7 @@ RESET=0
 FASTP=${FASTP:-fastp}
 BWA=${BWA:-bwa}
 SAMTOOLS=${SAMTOOLS:-samtools}
+DEDUP=${DEDUP:-dedup}
 MAPDAMAGE=${MAPDAMAGE:-mapDamage}
 PYTHON=${PYTHON:-python3}
 
@@ -117,6 +118,7 @@ Tool overrides:
   --fastp CMD
   --bwa CMD
   --samtools CMD
+  --dedup CMD
   --mapdamage CMD
   --python CMD
 
@@ -179,6 +181,7 @@ while [[ $# -gt 0 ]]; do
     --fastp) need_arg "$1" "${2-}"; FASTP="$2"; shift 2 ;;
     --bwa) need_arg "$1" "${2-}"; BWA="$2"; shift 2 ;;
     --samtools) need_arg "$1" "${2-}"; SAMTOOLS="$2"; shift 2 ;;
+    --dedup) need_arg "$1" "${2-}"; DEDUP="$2"; shift 2 ;;
     --mapdamage) need_arg "$1" "${2-}"; MAPDAMAGE="$2"; shift 2 ;;
     --python) need_arg "$1" "${2-}"; PYTHON="$2"; shift 2 ;;
     -h|--help) usage ;;
@@ -256,6 +259,7 @@ UNMAPPED="$WORK/unmapped"
 FINAL="$WORK/final"
 CKPT="$WORK/.checkpoints"
 REPORTS="$OUT/${SAMPLE}/fastp_reports"
+DEDUP_REPORTS="$OUT/${SAMPLE}/dedup_reports"
 
 STATS="$OUT/${SAMPLE}.plainmap.stats.tsv"
 COV_TSV="$OUT/${SAMPLE}.plainmap.coverage.tsv"
@@ -275,7 +279,7 @@ else
   TMP="$TMPBASE"
 fi
 
-mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$MDCHUNKS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
+mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$MDCHUNKS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS" "$DEDUP_REPORTS"
 
 ###############################################################################
 # COMPRESSION HELPERS (pigz if available)
@@ -359,12 +363,12 @@ ckpt_ok_exists() {
 
 if [[ $RESET -eq 1 ]]; then
   log "Reset requested: restarting from scratch for sample $SAMPLE"
-  rm -rf "$WORK" "$REPORTS" "$OUT/${SAMPLE}_mapdamage" 2>/dev/null || true
+  rm -rf "$WORK" "$REPORTS" "$DEDUP_REPORTS" "$OUT/${SAMPLE}_mapdamage" 2>/dev/null || true
   rm -f "$OUT/${SAMPLE}.final.RG.bam" "$OUT/${SAMPLE}.final.RG.bam.bai" \
         "$STATS" "$COV_TSV" "$RUN_CONFIG" \
         "$UNMAPPED_R1_FQ" "$UNMAPPED_R2_FQ" "$UNMAPPED_SE_FQ" 2>/dev/null || true
   rm -f "$CKPT/${SAMPLE}."*.done "$RAW_META" "$PE_IDLIST" "$SE_IDLIST" 2>/dev/null || true
-  mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$MDCHUNKS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS"
+  mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$MDCHUNKS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS" "$DEDUP_REPORTS"
 fi
 
 ###############################################################################
@@ -377,7 +381,7 @@ quick_preflight() {
   [[ -r "$MANIFEST" ]] || die "Manifest not readable: $MANIFEST"
   [[ -r "$REF" ]] || die "Reference not readable: $REF"
   require_cmd split
-  require_cmd "$FASTP"; require_cmd "$BWA"; require_cmd "$SAMTOOLS"; require_cmd "$PYTHON"
+  require_cmd "$FASTP"; require_cmd "$BWA"; require_cmd "$SAMTOOLS"; require_cmd "$DEDUP"; require_cmd "$PYTHON"
   check_split_filter_support
   if [[ $HAVE_PIGZ -eq 1 ]]; then
     require_cmd pigz
@@ -429,8 +433,9 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  pilot_fragments:     $PILOT_FRAGMENTS (PER-UNIT cap)"
   log "  max_reads_per_chunk: $MAX_READS_PER_CHUNK"
   log "  run_mapdamage:       $RUN_MAPDAMAGE (any library type)"
+  log "  duplicate handling:  DeDup (SE-like), samtools markdup (unmerged PE)"
   log "  delete_as_you_go:    $DELETE_AS_YOU_GO"
-  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> pool -> mapchunk -> map (per-chunk resume) -> merge (-f overwrite) -> dedup -> RG -> (mapDamage optional) -> coverage -> stats"
+  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> pool -> mapchunk -> map (per-chunk resume) -> merge (-f overwrite) -> class-specific dedup -> RG -> (mapDamage optional) -> coverage -> stats"
   exit 0
 fi
 
@@ -469,7 +474,7 @@ write_run_config() {
   ref_identity="$(file_identity "$REF")"
 
   {
-    printf 'config_schema\t1\n'
+    printf 'config_schema\t2\n'
     printf 'plainmap_version\t%s\n' "$VERSION"
     printf 'plainmap_script\t%s\n' "$script_path"
     printf 'plainmap_script_sha256\t%s\n' "$script_hash"
@@ -499,6 +504,7 @@ write_run_config() {
     printf 'fastp\t%s\n' "$FASTP"
     printf 'bwa\t%s\n' "$BWA"
     printf 'samtools\t%s\n' "$SAMTOOLS"
+    printf 'dedup\t%s\n' "$DEDUP"
     printf 'mapdamage\t%s\n' "$MAPDAMAGE"
     printf 'python\t%s\n' "$PYTHON"
   } > "$destination"
@@ -588,6 +594,7 @@ log_run_configuration() {
   log "  fastp:               $FASTP"
   log "  bwa:                 $BWA"
   log "  samtools:            $SAMTOOLS"
+  log "  dedup:               $DEDUP"
   log "  mapdamage:           $MAPDAMAGE"
   log "  python:              $PYTHON"
   [[ -n "$TMPDIR_USER" ]] && log "  tmpdir override:     $TMPDIR_USER" || log "  tmpdir override:     (none)"
@@ -1676,36 +1683,167 @@ else
 fi
 
 ###############################################################################
-# STEP 6: DEDUPLICATION (FLAG DUPLICATES, THEN FILTER)
+# STEP 6: CLASS-SPECIFIC DEDUPLICATION
 ###############################################################################
-MARKDUP_BAM="$FINAL/${SAMPLE}.markdup_flagged.bam"
+PE_INPUT_BAM="$FINAL/${SAMPLE}.pe.input.bam"
+SE_INPUT_BAM="$FINAL/${SAMPLE}.se_like.input.bam"
+PE_MARKDUP_BAM="$FINAL/${SAMPLE}.pe.markdup_flagged.bam"
+PE_DEDUP_BAM="$FINAL/${SAMPLE}.pe.dedup.bam"
+SE_DEDUP_BAM="$FINAL/${SAMPLE}.se_like.dedup.bam"
 DEDUP_BAM="$FINAL/${SAMPLE}.dedup.bam"
+DEDUP_META="$FINAL/${SAMPLE}.dedup.stats.tsv"
+DEDUP_EXCL_FLAGS=2820
+DEDUP_REPORT_BASE="$DEDUP_REPORTS/${SAMPLE}.se_like.coordsort"
 
-log "STEP: dedup (mark duplicates, then filter; duprate from duplicate flags)"
+count_fragments_in_bam() {
+  local bam="$1"
+  "$SAMTOOLS" view -F "$DEDUP_EXCL_FLAGS" "$bam" \
+    | awk 'BEGIN{c=0}
+           function hasbit(x,b){return and(x,b)}
+           {flag=$2; if(hasbit(flag,1)){if(hasbit(flag,64)) c++} else c++}
+           END{print c}'
+}
 
-if ckpt_ok dedup "$MARKDUP_BAM" "$DEDUP_BAM" && bam_ok "$MARKDUP_BAM" && bam_ok "$DEDUP_BAM"; then
-  log "  dedup (skipped; checkpoint present)"
+count_duplicate_fragments_in_bam() {
+  local bam="$1"
+  "$SAMTOOLS" view -F "$DEDUP_EXCL_FLAGS" "$bam" \
+    | awk 'BEGIN{c=0}
+           function hasbit(x,b){return and(x,b)}
+           {flag=$2;
+            if(hasbit(flag,1024)){
+              if(hasbit(flag,1)){if(hasbit(flag,64)) c++} else c++
+            }
+           }
+           END{print c}'
+}
+
+dedup_checkpoint_ok() {
+  ckpt_ok dedup "$DEDUP_BAM" "$DEDUP_META" || return 1
+  bam_ok "$DEDUP_BAM" || return 1
+
+  local se_fragments
+  se_fragments=$(awk -F '\t' '$1 == "se_like_fragments_all" {print $2}' "$DEDUP_META")
+  [[ "$se_fragments" =~ ^[0-9]+$ ]] || return 1
+  if [[ "$se_fragments" -gt 0 ]]; then
+    file_nonempty "${DEDUP_REPORT_BASE}.log" || return 1
+    file_exists "${DEDUP_REPORT_BASE}.hist" || return 1
+    file_nonempty "${DEDUP_REPORT_BASE}.dedup.json" || return 1
+    file_nonempty "${DEDUP_REPORT_BASE}.stdout.log" || return 1
+  fi
+}
+
+log "STEP: class-specific dedup (DeDup for SE-like; samtools markdup for unmerged PE)"
+
+if dedup_checkpoint_ok; then
+  log "  class-specific dedup (skipped; checkpoint present)"
 else
   ckpt_clear dedup
+  rm -f "$PE_INPUT_BAM" "$SE_INPUT_BAM" "$PE_MARKDUP_BAM" \
+        "$PE_DEDUP_BAM" "$SE_DEDUP_BAM" "$DEDUP_BAM" "$DEDUP_META" \
+        "$FINAL/${SAMPLE}.pe.namesort.bam" "$FINAL/${SAMPLE}.pe.fixmate.bam" \
+        "$FINAL/${SAMPLE}.pe.coordsort.bam" "$FINAL/${SAMPLE}.se_like.coordsort.bam"
 
-  if [[ ( "$LIBTYPE" == "modern" || "$LIBTYPE" == "ancient-all" ) && "$SEQ_MODE" != "SE" ]]; then
-    "$SAMTOOLS" sort -n -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.namesort.bam" "$MERGED_BAM"
-    "$SAMTOOLS" fixmate -m -@ "$SORT_THREADS" "$FINAL/${SAMPLE}.namesort.bam" "$FINAL/${SAMPLE}.fixmate.bam"
-    "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.coordsort.bam" "$FINAL/${SAMPLE}.fixmate.bam"
-    rm -f "$FINAL/${SAMPLE}.namesort.bam" "$FINAL/${SAMPLE}.fixmate.bam"
+  # BAM flag 0x1 distinguishes alignments originating from unmerged PE mapping.
+  "$SAMTOOLS" view -@ "$SORT_THREADS" -b -f 1 -o "$PE_INPUT_BAM" "$MERGED_BAM"
+  "$SAMTOOLS" view -@ "$SORT_THREADS" -b -F 1 -o "$SE_INPUT_BAM" "$MERGED_BAM"
+  bam_ok "$PE_INPUT_BAM" || die "PE-class BAM missing/invalid: $PE_INPUT_BAM"
+  bam_ok "$SE_INPUT_BAM" || die "SE-like-class BAM missing/invalid: $SE_INPUT_BAM"
+
+  PE_RECORDS=$("$SAMTOOLS" view -c "$PE_INPUT_BAM")
+  SE_RECORDS=$("$SAMTOOLS" view -c "$SE_INPUT_BAM")
+  dedup_outputs=()
+
+  PE_FRAGMENTS_ALL=0
+  PE_FRAGMENTS_UNIQUE=0
+  PE_DUP_FRAGMENTS=0
+  if [[ "$PE_RECORDS" -gt 0 ]]; then
+    log "  Unmerged PE: samtools fixmate + markdup ($PE_RECORDS alignment records)"
+    "$SAMTOOLS" sort -n -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.pe.namesort.bam" "$PE_INPUT_BAM"
+    "$SAMTOOLS" fixmate -m -@ "$SORT_THREADS" "$FINAL/${SAMPLE}.pe.namesort.bam" "$FINAL/${SAMPLE}.pe.fixmate.bam"
+    "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.pe.coordsort.bam" "$FINAL/${SAMPLE}.pe.fixmate.bam"
+    "$SAMTOOLS" markdup -s -@ "$SORT_THREADS" "$FINAL/${SAMPLE}.pe.coordsort.bam" "$PE_MARKDUP_BAM"
+    bam_ok "$PE_MARKDUP_BAM" || die "PE samtools markdup failed/invalid: $PE_MARKDUP_BAM"
+
+    "$SAMTOOLS" view -@ "$SORT_THREADS" -b -F 1028 -o "$TMP/${SAMPLE}.pe.nodup.unsorted.bam" "$PE_MARKDUP_BAM"
+    "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$PE_DEDUP_BAM" "$TMP/${SAMPLE}.pe.nodup.unsorted.bam"
+    bam_ok "$PE_DEDUP_BAM" || die "PE deduplicated BAM missing/invalid: $PE_DEDUP_BAM"
+
+    PE_FRAGMENTS_ALL=$(count_fragments_in_bam "$PE_MARKDUP_BAM")
+    PE_DUP_FRAGMENTS=$(count_duplicate_fragments_in_bam "$PE_MARKDUP_BAM")
+    PE_FRAGMENTS_UNIQUE=$(py_sub_nonneg "$PE_FRAGMENTS_ALL" "$PE_DUP_FRAGMENTS")
+    dedup_outputs+=( "$PE_DEDUP_BAM" )
   else
-    "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.coordsort.bam" "$MERGED_BAM"
+    log "  Unmerged PE: no alignments; samtools markdup not required"
   fi
 
-  "$SAMTOOLS" markdup -s -@ "$SORT_THREADS" "$FINAL/${SAMPLE}.coordsort.bam" "$MARKDUP_BAM"
-  rm -f "$FINAL/${SAMPLE}.coordsort.bam"
-  bam_ok "$MARKDUP_BAM" || die "markdup failed/invalid: $MARKDUP_BAM"
+  SE_FRAGMENTS_ALL=0
+  SE_FRAGMENTS_UNIQUE=0
+  SE_DUP_FRAGMENTS=0
+  if [[ "$SE_RECORDS" -gt 0 ]]; then
+    log "  SE-like: DeDup --merged ($SE_RECORDS alignment records)"
+    "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$FINAL/${SAMPLE}.se_like.coordsort.bam" "$SE_INPUT_BAM"
 
-  "$SAMTOOLS" view -b -F 1028 "$MARKDUP_BAM" > "$TMP/${SAMPLE}.nodup.unsorted.bam"
-  "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$DEDUP_BAM" "$TMP/${SAMPLE}.nodup.unsorted.bam"
-  rm -f "$TMP/${SAMPLE}.nodup.unsorted.bam"
-  bam_ok "$DEDUP_BAM" || die "Dedup BAM missing/invalid: $DEDUP_BAM"
+    dedup_generated_bam="${DEDUP_REPORT_BASE}_rmdup.bam"
+    rm -f "$dedup_generated_bam" \
+          "${DEDUP_REPORT_BASE}.log" \
+          "${DEDUP_REPORT_BASE}.hist" \
+          "${DEDUP_REPORT_BASE}.dedup.json" \
+          "${DEDUP_REPORT_BASE}.stdout.log"
 
+    "$DEDUP" --merged \
+      --input "$FINAL/${SAMPLE}.se_like.coordsort.bam" \
+      --output "$DEDUP_REPORTS" \
+      > "${DEDUP_REPORT_BASE}.stdout.log"
+    bam_ok "$dedup_generated_bam" || die "DeDup failed or produced an invalid SE-like BAM: $dedup_generated_bam"
+    file_nonempty "${DEDUP_REPORT_BASE}.log" || die "DeDup log missing/empty: ${DEDUP_REPORT_BASE}.log"
+    file_exists "${DEDUP_REPORT_BASE}.hist" || die "DeDup histogram missing: ${DEDUP_REPORT_BASE}.hist"
+    file_nonempty "${DEDUP_REPORT_BASE}.dedup.json" || die "DeDup JSON report missing/empty: ${DEDUP_REPORT_BASE}.dedup.json"
+    file_nonempty "${DEDUP_REPORT_BASE}.stdout.log" || die "DeDup stdout report missing/empty: ${DEDUP_REPORT_BASE}.stdout.log"
+
+    "$SAMTOOLS" sort -@ "$SORT_THREADS" -o "$SE_DEDUP_BAM" "$dedup_generated_bam"
+    rm -f "$dedup_generated_bam"
+    bam_ok "$SE_DEDUP_BAM" || die "SE-like deduplicated BAM missing/invalid: $SE_DEDUP_BAM"
+
+    SE_FRAGMENTS_ALL=$(count_fragments_in_bam "$SE_INPUT_BAM")
+    SE_FRAGMENTS_UNIQUE=$(count_fragments_in_bam "$SE_DEDUP_BAM")
+    [[ "$SE_FRAGMENTS_UNIQUE" -le "$SE_FRAGMENTS_ALL" ]] || \
+      die "DeDup output has more SE-like fragments than its input ($SE_FRAGMENTS_UNIQUE > $SE_FRAGMENTS_ALL)"
+    SE_DUP_FRAGMENTS=$(py_sub_nonneg "$SE_FRAGMENTS_ALL" "$SE_FRAGMENTS_UNIQUE")
+    dedup_outputs+=( "$SE_DEDUP_BAM" )
+  else
+    log "  SE-like: no alignments; DeDup not required"
+  fi
+
+  if [[ ${#dedup_outputs[@]} -eq 0 ]]; then
+    log "  No mapped alignments remain; producing an empty final BAM"
+    cp "$MERGED_BAM" "$DEDUP_BAM"
+  elif [[ ${#dedup_outputs[@]} -eq 1 ]]; then
+    cp "${dedup_outputs[0]}" "$DEDUP_BAM"
+  else
+    "$SAMTOOLS" merge -f -@ "$SORT_THREADS" "$DEDUP_BAM" "${dedup_outputs[@]}"
+  fi
+  bam_ok "$DEDUP_BAM" || die "Combined deduplicated BAM missing/invalid: $DEDUP_BAM"
+
+  TOTAL_FRAGMENTS_ALL=$(py_add "$PE_FRAGMENTS_ALL" "$SE_FRAGMENTS_ALL")
+  TOTAL_FRAGMENTS_UNIQUE=$(py_add "$PE_FRAGMENTS_UNIQUE" "$SE_FRAGMENTS_UNIQUE")
+  TOTAL_DUP_FRAGMENTS=$(py_add "$PE_DUP_FRAGMENTS" "$SE_DUP_FRAGMENTS")
+  {
+    printf 'metric\tvalue\n'
+    printf 'pe_fragments_all\t%s\n' "$PE_FRAGMENTS_ALL"
+    printf 'pe_fragments_unique\t%s\n' "$PE_FRAGMENTS_UNIQUE"
+    printf 'pe_duplicate_fragments\t%s\n' "$PE_DUP_FRAGMENTS"
+    printf 'se_like_fragments_all\t%s\n' "$SE_FRAGMENTS_ALL"
+    printf 'se_like_fragments_unique\t%s\n' "$SE_FRAGMENTS_UNIQUE"
+    printf 'se_like_duplicate_fragments\t%s\n' "$SE_DUP_FRAGMENTS"
+    printf 'total_fragments_all\t%s\n' "$TOTAL_FRAGMENTS_ALL"
+    printf 'total_fragments_unique\t%s\n' "$TOTAL_FRAGMENTS_UNIQUE"
+    printf 'total_duplicate_fragments\t%s\n' "$TOTAL_DUP_FRAGMENTS"
+  } > "$DEDUP_META"
+
+  rm -f "$PE_INPUT_BAM" "$SE_INPUT_BAM" \
+        "$FINAL/${SAMPLE}.pe.namesort.bam" "$FINAL/${SAMPLE}.pe.fixmate.bam" \
+        "$FINAL/${SAMPLE}.pe.coordsort.bam" "$FINAL/${SAMPLE}.se_like.coordsort.bam" \
+        "$TMP/${SAMPLE}.pe.nodup.unsorted.bam"
   ckpt_mark dedup
 fi
 
@@ -2079,34 +2217,36 @@ EXCL_FLAGS=2820
 MAPPED_READS_ALL=$("$SAMTOOLS" view -c -F "$EXCL_FLAGS" "$MERGED_BAM")
 MAPPED_READS_UNIQUE=$("$SAMTOOLS" view -c -F "$EXCL_FLAGS" "$OUT_BAM")
 
-MAPPED_FRAGMENTS_ALL=$("$SAMTOOLS" view -F "$EXCL_FLAGS" "$MARKDUP_BAM" \
-  | awk 'BEGIN{c=0}
-         function hasbit(x,b){return and(x,b)}
-         {flag=$2;
-          paired=hasbit(flag,1);
-          read1=hasbit(flag,64);
-          if(paired){ if(read1) c++ } else { c++ }
-         }
-         END{print c}'
-)
+dedup_stat() {
+  local metric="$1"
+  awk -F '\t' -v metric="$metric" '$1 == metric {print $2; found=1} END{if(!found) exit 1}' "$DEDUP_META"
+}
 
-DUP_FRAGMENTS=$("$SAMTOOLS" view -F "$EXCL_FLAGS" "$MARKDUP_BAM" \
-  | awk 'BEGIN{c=0}
-         function hasbit(x,b){return and(x,b)}
-         {flag=$2;
-          dup=hasbit(flag,1024);
-          paired=hasbit(flag,1);
-          read1=hasbit(flag,64);
-          if(dup){
-            if(paired){ if(read1) c++ } else { c++ }
-          }
-         }
-         END{print c}'
-)
-
-MAPPED_FRAGMENTS_UNIQUE="$(py_sub_nonneg "$MAPPED_FRAGMENTS_ALL" "$DUP_FRAGMENTS")"
+PE_FRAGMENTS_ALL=$(dedup_stat pe_fragments_all)
+PE_FRAGMENTS_UNIQUE=$(dedup_stat pe_fragments_unique)
+PE_DUP_FRAGMENTS=$(dedup_stat pe_duplicate_fragments)
+SE_FRAGMENTS_ALL=$(dedup_stat se_like_fragments_all)
+SE_FRAGMENTS_UNIQUE=$(dedup_stat se_like_fragments_unique)
+SE_DUP_FRAGMENTS=$(dedup_stat se_like_duplicate_fragments)
+MAPPED_FRAGMENTS_ALL=$(dedup_stat total_fragments_all)
+MAPPED_FRAGMENTS_UNIQUE=$(dedup_stat total_fragments_unique)
+DUP_FRAGMENTS=$(dedup_stat total_duplicate_fragments)
 
 DUPRATE=$("$PYTHON" - "$DUP_FRAGMENTS" "$MAPPED_FRAGMENTS_ALL" <<'PY'
+import sys
+d=float(sys.argv[1]); a=float(sys.argv[2])
+print("0.000000" if a<=0 else f"{(d/a):.6f}")
+PY
+)
+
+PE_DUPRATE=$("$PYTHON" - "$PE_DUP_FRAGMENTS" "$PE_FRAGMENTS_ALL" <<'PY'
+import sys
+d=float(sys.argv[1]); a=float(sys.argv[2])
+print("0.000000" if a<=0 else f"{(d/a):.6f}")
+PY
+)
+
+SE_DUPRATE=$("$PYTHON" - "$SE_DUP_FRAGMENTS" "$SE_FRAGMENTS_ALL" <<'PY'
 import sys
 d=float(sys.argv[1]); a=float(sys.argv[2])
 print("0.000000" if a<=0 else f"{(d/a):.6f}")
@@ -2132,8 +2272,8 @@ PY
 )
 
 {
-  printf "sample\tlibrary_type\tseq_mode\tpilot_fragments\tmax_reads_per_chunk\tmapq\traw_R1_reads\traw_R2_reads\traw_fragments\ttrimmed_fragments\tmerged_reads\tunpaired_reads\tmapped_reads_all\tmapped_reads_unique\tmapped_fragments_all\tmapped_fragments_unique\tendog\tduprate\tavg_readlen\tmapped_bp\tavg_depth\tpct_covered\tduplicate_fragments\n"
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "sample\tlibrary_type\tseq_mode\tpilot_fragments\tmax_reads_per_chunk\tmapq\traw_R1_reads\traw_R2_reads\traw_fragments\ttrimmed_fragments\tmerged_reads\tunpaired_reads\tmapped_reads_all\tmapped_reads_unique\tmapped_fragments_all\tmapped_fragments_unique\tendog\tduprate\tavg_readlen\tmapped_bp\tavg_depth\tpct_covered\tduplicate_fragments\tpe_dedup_method\tpe_fragments_all\tpe_fragments_unique\tpe_duplicate_fragments\tpe_duprate\tse_like_dedup_method\tse_like_fragments_all\tse_like_fragments_unique\tse_like_duplicate_fragments\tse_like_duprate\n"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "$SAMPLE" "$LIBTYPE" "$SEQ_MODE" "$PILOT_FRAGMENTS" "$MAX_READS_PER_CHUNK" "$MAPQ" \
     "$RAW_R1_READS" "$RAW_R2_READS" "$RAW_FRAGMENTS" \
     "$TRIMMED_FRAGMENTS" "$MERGED_READS" "$UNPAIRED_READS" \
@@ -2141,7 +2281,9 @@ PY
     "$MAPPED_FRAGMENTS_ALL" "$MAPPED_FRAGMENTS_UNIQUE" \
     "$ENDOG" "$DUPRATE" \
     "$AVG_READLEN" "$MAPPED_BP" \
-    "$AVG_DEPTH" "$PCT_COVERED" "$DUP_FRAGMENTS"
+    "$AVG_DEPTH" "$PCT_COVERED" "$DUP_FRAGMENTS" \
+    "samtools-markdup" "$PE_FRAGMENTS_ALL" "$PE_FRAGMENTS_UNIQUE" "$PE_DUP_FRAGMENTS" "$PE_DUPRATE" \
+    "DeDup" "$SE_FRAGMENTS_ALL" "$SE_FRAGMENTS_UNIQUE" "$SE_DUP_FRAGMENTS" "$SE_DUPRATE"
 } > "$STATS"
 
 log "STATS written: $STATS"

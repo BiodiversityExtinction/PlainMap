@@ -4,6 +4,10 @@ This directory records the manifest, commands, parameters, and expected results 
 the PlainMap manuscript evaluation. Sequence data and the 2.44 GB reference FASTA are not
 committed to the repository.
 
+These results used PlainMap v0.1.0 and its samtools-only duplicate-removal policy. Check
+out the immutable `v0.1.0` tag to reproduce them; v0.2.0 uses class-specific DeDup and
+samtools duplicate handling and will not reproduce the same duplicate statistics.
+
 ## Dataset
 
 The heterogeneous Z3 manifest contains:
