@@ -5,8 +5,10 @@ the PlainMap manuscript evaluation. Sequence data and the 2.44 GB reference FAST
 committed to the repository.
 
 These results used PlainMap v0.1.0 and its samtools-only duplicate-removal policy. Check
-out the immutable `v0.1.0` tag to reproduce them; v0.2.0 uses class-specific DeDup and
-samtools duplicate handling and will not reproduce the same duplicate statistics.
+out the immutable `v0.1.0` tag for exact software-version reproduction. PlainMap v0.2.0
+uses class-specific DeDup and samtools duplicate handling and will not reproduce the same
+duplicate statistics; v0.2.1 and later can retain the v0.1 methodology by specifying
+`--dedup-method samtools`.
 
 ## Dataset
 

@@ -25,6 +25,7 @@ Describe the problem and what you expected to happen.
 ## Input type
 
 - Library type: `modern`, `ancient-fast`, or `ancient-all`
+- Duplicate-removal method: `hybrid` or `samtools`
 - FASTQ layout: single-end, paired-end, mixed, or SRA-export
 - Are FASTQ paths listed in a manifest? yes/no
 
@@ -35,6 +36,7 @@ bash --version
 fastp --version
 bwa 2>&1 | head
 samtools --version
+dedup --version  # hybrid mode only
 ```
 
 ## Minimal example

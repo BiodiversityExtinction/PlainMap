@@ -2,8 +2,8 @@
 
 This directory contains a tiny paired-end dataset for a quick PlainMap smoke test.
 
-The required `dedup` executable must be available on `PATH`, even though this tiny
-example may not produce SE-like alignments requiring DeDup.
+The `dedup` executable must be available on `PATH` for the default hybrid policy. It is
+not required when running with `--dedup-method samtools`.
 
 Run from this directory:
 

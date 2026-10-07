@@ -4,7 +4,7 @@ PlainMap is a lightweight, restartable mapping pipeline for modern and degraded 
 
 PlainMap is implemented as a **single Bash script** and focuses on preprocessing, mapping, duplicate handling, BAM generation, and summary statistics without requiring a workflow engine or complex configuration system.
 
-Current version: **v0.2.0**
+Current version: **v0.2.1**
 
 ---
 
@@ -43,7 +43,7 @@ Current version: **v0.2.0**
 - **Restartable mapping (per-chunk resume):** already-produced valid chunk BAMs are not remapped
 - **Disk-space friendly mode:** optionally deletes chunk/mapchunk FASTQs as soon as they are safe to remove
 - Automatic use of pigz if available
-- Class-specific duplicate removal: DeDup for all SE-like reads and samtools markdup for unmerged PE reads
+- Selectable duplicate handling: hybrid DeDup/samtools by default, or the v0.1 samtools-only policy
 - Separate PE and SE-like duplicate counts and duplication rates
 - Optional mapDamage for any library type, automatically parallelized by contig when `--threads` > 1
 - Optional export of unmapped reads as FASTQ (`samtools fastq`)
@@ -72,14 +72,9 @@ All tools must be available on PATH unless overridden via flags.
 - fastp
 - bwa
 - samtools
-- [DeDup](https://github.com/apeltzer/DeDup) 0.12.9 or later
 - python3
 - GNU split (must support `--filter`)
 - gzip and zcat
-
-DeDup can be installed from Bioconda:
-
-    conda install -c conda-forge -c bioconda dedup
 
 ### Optional (recommended)
 
@@ -87,7 +82,12 @@ DeDup can be installed from Bioconda:
 
 ### Optional (only if enabled)
 
+- [DeDup](https://github.com/apeltzer/DeDup) 0.12.9 or later (required for the default `--dedup-method hybrid`; not required for `samtools`)
 - mapDamage (required only if `--run-mapdamage` is used)
+
+DeDup can be installed from Bioconda:
+
+    conda install -c conda-forge -c bioconda dedup
 
 ---
 
@@ -158,9 +158,9 @@ In this case:
    - ancient-fast: bwa aln + samse (SE-like only)
    - ancient-all: bwa aln + sampe / samse
 10. Merge of mapping outputs (overwrite-safe)
-11. Class-specific duplicate removal:
-   - SE-like reads: DeDup `--merged`, using both alignment ends
-   - Unmerged PE reads: samtools `fixmate + markdup`
+11. Duplicate removal:
+   - `hybrid` (default): DeDup `--merged` for SE-like reads and samtools `fixmate + markdup` for unmerged PE reads
+   - `samtools`: v0.1-compatible samtools `markdup` processing of the combined BAM
 12. Final sorting, indexing, and read group assignment
 13. Optional mapDamage
 14. Coverage and depth statistics
@@ -177,6 +177,7 @@ Common defaults (you can usually omit these):
 - Delete-as-you-go is ON by default (`--no-delete-as-you-go` disables it)
 - mapDamage is OFF by default (`--run-mapdamage` enables it)
 - Unmapped FASTQ export is OFF by default (`--emit-unmapped-fastq` enables it)
+- Hybrid duplicate handling is used by default (`--dedup-method samtools` selects the v0.1-compatible policy)
 
 PlainMap records the effective configuration of each run in
 `SAMPLE.plainmap.run-config.tsv`. Reusing the same output directory and prefix requires
@@ -216,6 +217,7 @@ Optional parameters:
 | `--minlength INT` | `30` | Minimum read length after trimming (`fastp -l`). |
 | `--mismatch FLOAT` | `0.01` | Mismatch rate for `bwa aln -n` (ancient-fast/ancient-all). |
 | `--mapq INT` | `20` | MAPQ threshold applied during BAM generation. |
+| `--dedup-method hybrid\|samtools` | `hybrid` | Duplicate-removal policy. `samtools` applies the combined-BAM v0.1 policy for comparable ongoing analyses. |
 | `--emit-unmapped-fastq` | off | Export unmapped reads to `SAMPLE.unmapped.*.fastq.gz` without changing final BAM/stats filtering. |
 | `--max-reads-per-chunk INT` | `0` | Pre/post-fastp chunking size cap (`0` disables chunk splitting). |
 | `--pilot-fragments INT` | `0` | Per-unit read/fragment cap before fastp (`0` disables pilot mode). |
@@ -272,6 +274,16 @@ Ancient-all DNA:
       --library-type ancient-all \
       --threads 16
 
+Samtools-only duplicate removal compatible with the v0.1 policy:
+
+    bash plainmap.sh \
+      --manifest manifest.txt \
+      --prefix SAMPLE1 \
+      --ref reference.fa \
+      --outdir results \
+      --dedup-method samtools \
+      --threads 16
+
 Trim-only mode:
 
     bash plainmap.sh \
@@ -324,7 +336,7 @@ Main outputs:
 - SAMPLE.plainmap.coverage.tsv
 - SAMPLE.plainmap.run-config.tsv
 - SAMPLE_plainmap.log
-- SAMPLE/dedup_reports/ (DeDup log, histogram, JSON, and captured stdout when SE-like alignments are present)
+- SAMPLE/dedup_reports/ (hybrid mode only; DeDup log, histogram, JSON, and captured stdout when SE-like alignments are present)
 
 Optional outputs:
 
@@ -368,15 +380,14 @@ reported result tables used for the v0.1.0 manuscript evaluation are archived in
 
 ## Duplicate Handling
 
-PlainMap v0.2 uses a fixed policy rather than a user-selectable deduplication method:
+PlainMap provides two duplicate-removal policies:
 
-- All merged, unpaired, and true single-end reads are pooled as SE-like reads and processed by DeDup with `--merged`. DeDup compares both alignment ends and retains the highest-quality representative for each duplicate group.
-- Unmerged paired-end reads are processed separately with samtools `fixmate` and `markdup`, which uses paired template coordinates.
-- The two deduplicated alignment classes are merged before read-group assignment, mapDamage, coverage calculation, and final statistics.
+- `hybrid` (default): merged, unpaired, and true single-end reads are pooled as SE-like reads and processed by DeDup with `--merged`; unmerged paired-end reads are processed separately with samtools `fixmate` and `markdup`. The classes are recombined before downstream processing.
+- `samtools`: the combined mapped BAM is processed using the same name-sort/fixmate/coordinate-sort/markdup sequence used by PlainMap v0.1.0. Use this mode for new samples that must remain methodologically comparable with v0.1 analyses.
 
-Using DeDup `--merged` is well suited to merged reads whose aligned ends represent both molecular ends. For true SE reads shorter than the original molecule, the aligned 3' end may not be the molecular end; DeDup can therefore leave some duplicates unresolved. PlainMap applies the fixed policy consistently to keep mixed manifests and restart behavior simple. Use the immutable `v0.1.0` release when reproducing analyses that used the previous samtools-only policy.
+Using DeDup `--merged` is well suited to merged reads whose aligned ends represent both molecular ends. For true SE reads shorter than the original molecule, the aligned 3' end may not be the molecular end; DeDup can therefore leave some duplicates unresolved. The selected method is recorded in the run configuration and summary statistics, and cannot be changed when resuming. The immutable `v0.1.0` tag remains available for exact software-version reproduction.
 
-## Limitations (v0.2.0)
+## Limitations (v0.2.1)
 
 - Single read group per sample
 - No QC plotting
@@ -387,7 +398,7 @@ Using DeDup `--merged` is well suited to merged reads whose aligned ends represe
 
 ## Development Status
 
-PlainMap is **v0.2.0** and under active development.
+PlainMap is **v0.2.1** and under active development.
 
 Issues, feedback, and pull requests are welcome.
 

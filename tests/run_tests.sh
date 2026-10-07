@@ -95,6 +95,7 @@ validate_outputs() {
   local prefix="$1"
   local mode="$2"
   local outdir="$3"
+  local dedup_method="${4:-hybrid}"
   local bam="$outdir/${prefix}.final.RG.bam"
   local stats="$outdir/${prefix}.plainmap.stats.tsv"
 
@@ -125,13 +126,14 @@ validate_outputs() {
     return 1
   fi
 
-  python3 - "$stats" <<'PY'
+  python3 - "$stats" "$dedup_method" <<'PY'
 import csv
 import math
 import sys
 
 with open(sys.argv[1], newline="") as handle:
     row = next(csv.DictReader(handle, delimiter="\t"))
+expected_method = sys.argv[2]
 
 raw = int(row["raw_fragments"])
 mapped_all = int(row["mapped_fragments_all"])
@@ -147,7 +149,9 @@ assert float(row["avg_depth"]) >= 0
 assert 0 <= float(row["pct_covered"]) <= 100
 
 assert row["pe_dedup_method"] == "samtools-markdup"
-assert row["se_like_dedup_method"] == "DeDup"
+assert row["dedup_method"] == expected_method
+expected_se_method = "DeDup" if expected_method == "hybrid" else "samtools-markdup"
+assert row["se_like_dedup_method"] == expected_se_method
 
 for prefix in ("pe", "se_like"):
     all_fragments = int(row[f"{prefix}_fragments_all"])
@@ -179,6 +183,62 @@ for mode in modern ancient-fast ancient-all; do
   validate_outputs "$mode" "$mode" "$outdir"
 done
 
+echo "Testing v0.1-compatible samtools-only deduplication in all mapping modes"
+for mode in modern ancient-fast ancient-all; do
+  outdir="$TMP_ROOT/samtools-modes/$mode"
+  run_plainmap "samtools_${mode}" "$mode" "$outdir" \
+    --dedup-method samtools --dedup /definitely/not/installed/dedup
+  validate_outputs "samtools_${mode}" "$mode" "$outdir" samtools
+  grep -F $'dedup_method\tsamtools' \
+    "$outdir/samtools_${mode}.plainmap.run-config.tsv" >/dev/null
+  if find "$outdir/samtools_${mode}/dedup_reports" -type f -print -quit | grep -q .; then
+    echo "ERROR: samtools-only mode unexpectedly produced DeDup reports" >&2
+    exit 1
+  fi
+done
+
+if git -C "$REPO_ROOT" rev-parse --verify --quiet refs/tags/v0.1.0 >/dev/null; then
+  echo "Testing samtools-only output against the immutable v0.1.0 release"
+  old_plainmap="$TMP_ROOT/plainmap-v0.1.0.sh"
+  git -C "$REPO_ROOT" show v0.1.0:plainmap.sh > "$old_plainmap"
+  chmod +x "$old_plainmap"
+  old_out="$TMP_ROOT/v0.1-compatibility"
+  if ! bash "$old_plainmap" \
+      --manifest "$TMP_ROOT/manifest.txt" \
+      --prefix samtools_modern \
+      --ref "$TMP_ROOT/reference.fa" \
+      --outdir "$old_out" \
+      --threads 1 \
+      --library-type modern > "$TMP_ROOT/v0.1-compatibility.driver.log" 2>&1; then
+    cat "$TMP_ROOT/v0.1-compatibility.driver.log" >&2
+    exit 1
+  fi
+
+  current_out="$TMP_ROOT/samtools-modes/modern"
+  [[ "$(alignment_checksum "$old_out/samtools_modern.final.RG.bam")" == \
+     "$(alignment_checksum "$current_out/samtools_modern.final.RG.bam")" ]]
+
+  python3 - \
+    "$old_out/samtools_modern.plainmap.stats.tsv" \
+    "$current_out/samtools_modern.plainmap.stats.tsv" <<'PY'
+import csv
+import sys
+
+def read(path):
+    with open(path, newline="") as handle:
+        return next(csv.DictReader(handle, delimiter="\t"))
+
+old = read(sys.argv[1])
+current = read(sys.argv[2])
+shared = old.keys() & current.keys()
+differences = {key: (old[key], current[key]) for key in shared if old[key] != current[key]}
+assert not differences, differences
+assert len(shared) == 23, shared
+PY
+else
+  echo "Skipping v0.1.0 compatibility test (tag not available in this checkout)"
+fi
+
 echo "Testing strict resume configuration and reset"
 config_out="$TMP_ROOT/config-output"
 run_plainmap config modern "$config_out" --keep-intermediate
@@ -199,6 +259,22 @@ if bash "$PLAINMAP" \
 fi
 grep -F "Resume configuration mismatch" "$TMP_ROOT/config-mismatch.log" >/dev/null
 grep -F "mapq: previous='20'; current='25'" "$TMP_ROOT/config-mismatch.log" >/dev/null
+
+if bash "$PLAINMAP" \
+    --manifest "$TMP_ROOT/manifest.txt" \
+    --prefix config \
+    --ref "$TMP_ROOT/reference.fa" \
+    --outdir "$config_out" \
+    --threads 1 \
+    --library-type modern \
+    --dedup-method samtools \
+    --keep-intermediate > "$TMP_ROOT/dedup-method-mismatch.log" 2>&1; then
+  echo "ERROR: changed dedup method unexpectedly resumed" >&2
+  exit 1
+fi
+grep -F "dedup_method: previous='hybrid'; current='samtools'" \
+  "$TMP_ROOT/dedup-method-mismatch.log" >/dev/null
+
 run_plainmap config modern "$config_out" --mapq 25 --keep-intermediate --reset
 grep -F $'mapq\t25' "$config_out/config.plainmap.run-config.tsv" >/dev/null
 

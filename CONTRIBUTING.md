@@ -37,9 +37,9 @@ bash tests/run_tests.sh
 ```
 
 The suite requires DeDup and generates a temporary mixed SRA-style PE/SE dataset with a
-known SE duplicate. It exercises all mapping
+known SE duplicate. It exercises both duplicate-removal policies in all mapping
 modes, resume configuration checks, forced chunking equivalence, checkpoint reuse, BAM
-invariants, class-specific duplicate handling, summary-statistic formulas, and corrupt
+invariants, duplicate handling, summary-statistic formulas, and corrupt
 FASTQ handling.
 
 If your change affects outputs, please describe the expected behavior change and update the README or example documentation where relevant.

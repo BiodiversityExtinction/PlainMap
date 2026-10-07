@@ -2,6 +2,18 @@
 
 All notable changes to PlainMap will be documented here.
 
+## v0.2.1 - 2026-10-07
+
+### Added
+
+- Added `--dedup-method hybrid|samtools`. The default `hybrid` policy retains v0.2.0 behavior, while `samtools` reproduces the combined-BAM duplicate-removal sequence used by v0.1.0.
+- Recorded the selected duplicate-removal policy in run configuration, logs, and summary statistics.
+- Added regression coverage for both duplicate-removal policies in all mapping modes and for resume rejection when the policy changes.
+
+### Changed
+
+- DeDup is required only for `--dedup-method hybrid`; samtools-only runs no longer require DeDup to be installed.
+
 ## v0.2.0 - 2026-09-24
 
 ### Added
