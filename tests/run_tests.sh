@@ -16,6 +16,11 @@ for cmd in fastp bwa samtools "$DEDUP_CMD" python3 gzip sha256sum; do
 done
 
 bash -n "$PLAINMAP"
+gap_open_calls=$(grep -F -c '"$BWA" aln -l 999 -n "$MISMATCH" -o "$GAP_OPENS"' "$PLAINMAP")
+[[ "$gap_open_calls" -eq 3 ]] || {
+  echo "ERROR: expected all three bwa aln calls to include -o \"\$GAP_OPENS\"" >&2
+  exit 1
+}
 gzip -t "$REPO_ROOT/example/reads_R1.fastq.gz" "$REPO_ROOT/example/reads_R2.fastq.gz"
 
 cp "$REPO_ROOT/example/reference.fa" "$TMP_ROOT/reference.fa"
@@ -181,6 +186,7 @@ for mode in modern ancient-fast ancient-all; do
   outdir="$TMP_ROOT/modes/$mode"
   run_plainmap "$mode" "$mode" "$outdir"
   validate_outputs "$mode" "$mode" "$outdir"
+  grep -F $'gap_opens\t2' "$outdir/${mode}.plainmap.run-config.tsv" >/dev/null
 done
 
 echo "Testing v0.1-compatible samtools-only deduplication in all mapping modes"
@@ -235,6 +241,26 @@ differences = {key: (old[key], current[key]) for key in shared if old[key] != cu
 assert not differences, differences
 assert len(shared) == 23, shared
 PY
+
+  echo "Testing ancient v0.1 mapping compatibility with --gap-opens 1"
+  current_ancient_out="$TMP_ROOT/v0.1-ancient-current"
+  run_plainmap compat_ancient ancient-fast "$current_ancient_out" \
+    --gap-opens 1 --dedup-method samtools --dedup /definitely/not/installed/dedup
+  grep -F $'gap_opens\t1' "$current_ancient_out/compat_ancient.plainmap.run-config.tsv" >/dev/null
+
+  old_ancient_out="$TMP_ROOT/v0.1-ancient-release"
+  if ! bash "$old_plainmap" \
+      --manifest "$TMP_ROOT/manifest.txt" \
+      --prefix compat_ancient \
+      --ref "$TMP_ROOT/reference.fa" \
+      --outdir "$old_ancient_out" \
+      --threads 1 \
+      --library-type ancient-fast > "$TMP_ROOT/v0.1-ancient.driver.log" 2>&1; then
+    cat "$TMP_ROOT/v0.1-ancient.driver.log" >&2
+    exit 1
+  fi
+  [[ "$(alignment_checksum "$old_ancient_out/compat_ancient.final.RG.bam")" == \
+     "$(alignment_checksum "$current_ancient_out/compat_ancient.final.RG.bam")" ]]
 else
   echo "Skipping v0.1.0 compatibility test (tag not available in this checkout)"
 fi
@@ -274,6 +300,33 @@ if bash "$PLAINMAP" \
 fi
 grep -F "dedup_method: previous='hybrid'; current='samtools'" \
   "$TMP_ROOT/dedup-method-mismatch.log" >/dev/null
+
+if bash "$PLAINMAP" \
+    --manifest "$TMP_ROOT/manifest.txt" \
+    --prefix config \
+    --ref "$TMP_ROOT/reference.fa" \
+    --outdir "$config_out" \
+    --threads 1 \
+    --library-type modern \
+    --gap-opens 1 \
+    --keep-intermediate > "$TMP_ROOT/gap-opens-mismatch.log" 2>&1; then
+  echo "ERROR: changed gap-open setting unexpectedly resumed" >&2
+  exit 1
+fi
+grep -F "gap_opens: previous='2'; current='1'" \
+  "$TMP_ROOT/gap-opens-mismatch.log" >/dev/null
+
+if bash "$PLAINMAP" \
+    --manifest "$TMP_ROOT/manifest.txt" \
+    --prefix invalid_gap_opens \
+    --ref "$TMP_ROOT/reference.fa" \
+    --outdir "$TMP_ROOT/invalid-gap-opens" \
+    --gap-opens -1 > "$TMP_ROOT/invalid-gap-opens.log" 2>&1; then
+  echo "ERROR: negative --gap-opens unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -F -- "--gap-opens must be a non-negative integer" \
+  "$TMP_ROOT/invalid-gap-opens.log" >/dev/null
 
 run_plainmap config modern "$config_out" --mapq 25 --keep-intermediate --reset
 grep -F $'mapq\t25' "$config_out/config.plainmap.run-config.tsv" >/dev/null

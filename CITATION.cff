@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use PlainMap, please cite it using these metadata."
 type: software
 title: "PlainMap: a simple mapping pipeline for ancient and modern DNA"
-version: "0.2.1"
-date-released: 2026-10-07
+version: "0.2.2"
+date-released: 2026-11-01
 authors:
   - family-names: Wesbury
     given-names: Michael V

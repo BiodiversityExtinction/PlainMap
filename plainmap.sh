@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PlainMap v0.2.1
+# PlainMap v0.2.2
 # Lightweight, restartable mapping pipeline for ancient-fast, ancient-all, and modern DNA
 #
 # Key properties (current dev version):
@@ -39,11 +39,12 @@ fi
 ###############################################################################
 # DEFAULTS
 ###############################################################################
-VERSION="0.2.1"
+VERSION="0.2.2"
 
 THREADS=1
 MINLEN=30
 MISMATCH=0.01              # bwa aln -n (ancient-fast/ancient-all)
+GAP_OPENS=2                # bwa aln -o (ancient-fast/ancient-all)
 LIBTYPE="modern"           # modern|ancient-fast|ancient-all
 MAX_READS_PER_CHUNK=0      # 0 disables pre-fastp chunking safety valve
 PILOT_FRAGMENTS=0          # 0 disables pilot; otherwise PER-UNIT cap on fragments BEFORE fastp
@@ -98,6 +99,7 @@ Optional:
   --threads INT                              (default: 1)
   --minlength INT                            (default: 30)
   --mismatch FLOAT                           (ancient-fast/ancient-all; bwa aln -n; default: 0.01)
+  --gap-opens INT                            (ancient-fast/ancient-all; bwa aln -o; default: 2)
   --mapq INT                                 Mapping quality threshold (default: 20)
   --dedup-method hybrid|samtools             (default: hybrid; samtools matches v0.1 behavior)
   --emit-unmapped-fastq                      Export unmapped reads to FASTQ
@@ -160,6 +162,7 @@ while [[ $# -gt 0 ]]; do
     --threads) need_arg "$1" "${2-}"; THREADS="$2"; shift 2 ;;
     --minlength) need_arg "$1" "${2-}"; MINLEN="$2"; shift 2 ;;
     --mismatch) need_arg "$1" "${2-}"; MISMATCH="$2"; shift 2 ;;
+    --gap-opens) need_arg "$1" "${2-}"; GAP_OPENS="$2"; shift 2 ;;
     --mapq) need_arg "$1" "${2-}"; MAPQ="$2"; shift 2 ;;
     --dedup-method) need_arg "$1" "${2-}"; DEDUP_METHOD="$2"; shift 2 ;;
     --emit-unmapped-fastq) EMIT_UNMAPPED_FASTQ=1; shift ;;
@@ -202,6 +205,7 @@ done
   exit 1
 }
 [[ "$MAPQ" =~ ^[0-9]+$ ]] || { echo "ERROR: --mapq must be an integer"; exit 1; }
+[[ "$GAP_OPENS" =~ ^[0-9]+$ ]] || { echo "ERROR: --gap-opens must be a non-negative integer"; exit 1; }
 [[ "$THREADS" =~ ^[0-9]+$ ]] || { echo "ERROR: --threads must be an integer"; exit 1; }
 [[ "$MAX_READS_PER_CHUNK" =~ ^[0-9]+$ ]] || { echo "ERROR: --max-reads-per-chunk must be an integer"; exit 1; }
 [[ "$PILOT_FRAGMENTS" =~ ^[0-9]+$ ]] || { echo "ERROR: --pilot-fragments must be an integer"; exit 1; }
@@ -436,6 +440,7 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  threads:             $THREADS"
   log "  minlength:           $MINLEN"
   log "  mismatch (aln):      $MISMATCH"
+  log "  gap_opens (aln):     $GAP_OPENS"
   log "  mapq:                $MAPQ"
   log "  emit_unmapped_fastq: $EMIT_UNMAPPED_FASTQ"
   log "  pilot_fragments:     $PILOT_FRAGMENTS (PER-UNIT cap)"
@@ -482,7 +487,7 @@ write_run_config() {
   ref_identity="$(file_identity "$REF")"
 
   {
-    printf 'config_schema\t3\n'
+    printf 'config_schema\t4\n'
     printf 'plainmap_version\t%s\n' "$VERSION"
     printf 'plainmap_script\t%s\n' "$script_path"
     printf 'plainmap_script_sha256\t%s\n' "$script_hash"
@@ -496,6 +501,7 @@ write_run_config() {
     printf 'threads\t%s\n' "$THREADS"
     printf 'minlength\t%s\n' "$MINLEN"
     printf 'mismatch\t%s\n' "$MISMATCH"
+    printf 'gap_opens\t%s\n' "$GAP_OPENS"
     printf 'mapq\t%s\n' "$MAPQ"
     printf 'dedup_method\t%s\n' "$DEDUP_METHOD"
     printf 'emit_unmapped_fastq\t%s\n' "$EMIT_UNMAPPED_FASTQ"
@@ -589,6 +595,7 @@ log_run_configuration() {
   log "  threads:             $THREADS"
   log "  minlength:           $MINLEN"
   log "  mismatch (aln):      $MISMATCH"
+  log "  gap_opens (aln):     $GAP_OPENS"
   log "  mapq:                $MAPQ"
   log "  dedup_method:        $DEDUP_METHOD"
   log "  pilot_fragments:     $PILOT_FRAGMENTS"
@@ -1444,7 +1451,7 @@ map_pe_mem_chunk() {
 map_se_aln_chunk() {
   local fq="$1" outbam="$2" tag="$3" unmapped_prefix="$4"
   local tmpbam="${outbam}.tmp"
-  "$BWA" aln -l 999 -n "$MISMATCH" -t "$THREADS" "$REF" "$fq" > "$TMP/${SAMPLE}.${tag}.sai"
+  "$BWA" aln -l 999 -n "$MISMATCH" -o "$GAP_OPENS" -t "$THREADS" "$REF" "$fq" > "$TMP/${SAMPLE}.${tag}.sai"
   "$BWA" samse "$REF" "$TMP/${SAMPLE}.${tag}.sai" "$fq" > "$TMP/${SAMPLE}.${tag}.sam"
   capture_unmapped_from_sam "$TMP/${SAMPLE}.${tag}.sam" "$unmapped_prefix"
   sam_to_chunk_bam "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"
@@ -1463,8 +1470,8 @@ map_pe_aln_chunk() {
   n1x="$(normalize_qname "$h1")"; n2x="$(normalize_qname "$h2")"
   [[ "$n1x" == "$n2x" ]] || die "Refusing to run sampe: PE chunks first read names differ: $(basename "$fq1")='$n1x' vs $(basename "$fq2")='$n2x'"
 
-  "$BWA" aln -l 999 -n "$MISMATCH" -t "$THREADS" "$REF" "$fq1" > "$TMP/${SAMPLE}.${tag}.1.sai"
-  "$BWA" aln -l 999 -n "$MISMATCH" -t "$THREADS" "$REF" "$fq2" > "$TMP/${SAMPLE}.${tag}.2.sai"
+  "$BWA" aln -l 999 -n "$MISMATCH" -o "$GAP_OPENS" -t "$THREADS" "$REF" "$fq1" > "$TMP/${SAMPLE}.${tag}.1.sai"
+  "$BWA" aln -l 999 -n "$MISMATCH" -o "$GAP_OPENS" -t "$THREADS" "$REF" "$fq2" > "$TMP/${SAMPLE}.${tag}.2.sai"
   "$BWA" sampe "$REF" "$TMP/${SAMPLE}.${tag}.1.sai" "$TMP/${SAMPLE}.${tag}.2.sai" "$fq1" "$fq2" > "$TMP/${SAMPLE}.${tag}.sam"
   capture_unmapped_from_sam "$TMP/${SAMPLE}.${tag}.sam" "$unmapped_prefix"
   sam_to_chunk_bam "$TMP/${SAMPLE}.${tag}.sam" "$TMP/${SAMPLE}.${tag}.bam.tmp"

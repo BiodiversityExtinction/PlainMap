@@ -7,8 +7,8 @@ committed to the repository.
 These results used PlainMap v0.1.0 and its samtools-only duplicate-removal policy. Check
 out the immutable `v0.1.0` tag for exact software-version reproduction. PlainMap v0.2.0
 uses class-specific DeDup and samtools duplicate handling and will not reproduce the same
-duplicate statistics; v0.2.1 and later can retain the v0.1 methodology by specifying
-`--dedup-method samtools`.
+duplicate statistics. In v0.2.2 and later, retain the v0.1 mapping and duplicate-removal
+methodology by specifying `--gap-opens 1 --dedup-method samtools`.
 
 ## Dataset
 
@@ -99,7 +99,7 @@ Each mode used the following PlainMap settings:
 ```
 
 All other analysis parameters retained PlainMap defaults: minimum read length 30 bp,
-MAPQ 20, `bwa aln -n 0.01` for ancient modes, automatic adapter detection, resume enabled,
+MAPQ 20, `bwa aln -n 0.01 -o 1` for ancient modes, automatic adapter detection, resume enabled,
 delete-as-you-go enabled, mapDamage disabled, and unmapped FASTQ export disabled.
 
 ## Chunking and interrupted restart

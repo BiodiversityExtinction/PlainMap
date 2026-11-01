@@ -4,7 +4,7 @@ PlainMap is a lightweight, restartable mapping pipeline for modern and degraded 
 
 PlainMap is implemented as a **single Bash script** and focuses on preprocessing, mapping, duplicate handling, BAM generation, and summary statistics without requiring a workflow engine or complex configuration system.
 
-Current version: **v0.2.1**
+Current version: **v0.2.2**
 
 ---
 
@@ -178,6 +178,7 @@ Common defaults (you can usually omit these):
 - mapDamage is OFF by default (`--run-mapdamage` enables it)
 - Unmapped FASTQ export is OFF by default (`--emit-unmapped-fastq` enables it)
 - Hybrid duplicate handling is used by default (`--dedup-method samtools` selects the v0.1-compatible policy)
+- Ancient modes use `bwa aln -o 2` by default (`--gap-opens 1` restores the earlier default)
 
 PlainMap records the effective configuration of each run in
 `SAMPLE.plainmap.run-config.tsv`. Reusing the same output directory and prefix requires
@@ -216,6 +217,7 @@ Optional parameters:
 | `--threads INT` | `1` | Threads used by fastp, bwa, samtools, and pigz where applicable. |
 | `--minlength INT` | `30` | Minimum read length after trimming (`fastp -l`). |
 | `--mismatch FLOAT` | `0.01` | Mismatch rate for `bwa aln -n` (ancient-fast/ancient-all). |
+| `--gap-opens INT` | `2` | Maximum gap opens for `bwa aln -o` (ancient-fast/ancient-all). Use `1` to reproduce the v0.1-v0.2.1 mapping default. |
 | `--mapq INT` | `20` | MAPQ threshold applied during BAM generation. |
 | `--dedup-method hybrid\|samtools` | `hybrid` | Duplicate-removal policy. `samtools` applies the combined-BAM v0.1 policy for comparable ongoing analyses. |
 | `--emit-unmapped-fastq` | off | Export unmapped reads to `SAMPLE.unmapped.*.fastq.gz` without changing final BAM/stats filtering. |
@@ -274,13 +276,25 @@ Ancient-all DNA:
       --library-type ancient-all \
       --threads 16
 
-Samtools-only duplicate removal compatible with the v0.1 policy:
+Samtools-only duplicate removal compatible with the v0.1 duplicate policy:
 
     bash plainmap.sh \
       --manifest manifest.txt \
       --prefix SAMPLE1 \
       --ref reference.fa \
       --outdir results \
+      --dedup-method samtools \
+      --threads 16
+
+Earlier ancient mapping and duplicate-removal defaults:
+
+    bash plainmap.sh \
+      --manifest manifest.txt \
+      --prefix SAMPLE1 \
+      --ref reference.fa \
+      --outdir results \
+      --library-type ancient-all \
+      --gap-opens 1 \
       --dedup-method samtools \
       --threads 16
 
@@ -385,9 +399,9 @@ PlainMap provides two duplicate-removal policies:
 - `hybrid` (default): merged, unpaired, and true single-end reads are pooled as SE-like reads and processed by DeDup with `--merged`; unmerged paired-end reads are processed separately with samtools `fixmate` and `markdup`. The classes are recombined before downstream processing.
 - `samtools`: the combined mapped BAM is processed using the same name-sort/fixmate/coordinate-sort/markdup sequence used by PlainMap v0.1.0. Use this mode for new samples that must remain methodologically comparable with v0.1 analyses.
 
-Using DeDup `--merged` is well suited to merged reads whose aligned ends represent both molecular ends. For true SE reads shorter than the original molecule, the aligned 3' end may not be the molecular end; DeDup can therefore leave some duplicates unresolved. The selected method is recorded in the run configuration and summary statistics, and cannot be changed when resuming. The immutable `v0.1.0` tag remains available for exact software-version reproduction.
+Using DeDup `--merged` is well suited to merged reads whose aligned ends represent both molecular ends. For true SE reads shorter than the original molecule, the aligned 3' end may not be the molecular end; DeDup can therefore leave some duplicates unresolved. The selected method is recorded in the run configuration and summary statistics, and cannot be changed when resuming. The immutable earlier release tags remain available for exact software-version reproduction. Ancient analyses requiring the v0.1-v0.2.1 mapping default should specify `--gap-opens 1`; v0.2.2 defaults to `2`.
 
-## Limitations (v0.2.1)
+## Limitations (v0.2.2)
 
 - Single read group per sample
 - No QC plotting
@@ -398,7 +412,7 @@ Using DeDup `--merged` is well suited to merged reads whose aligned ends represe
 
 ## Development Status
 
-PlainMap is **v0.2.1** and under active development.
+PlainMap is **v0.2.2** and under active development.
 
 Issues, feedback, and pull requests are welcome.
 

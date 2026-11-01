@@ -2,6 +2,16 @@
 
 All notable changes to PlainMap will be documented here.
 
+## v0.2.2 - 2026-11-01
+
+### Added
+
+- Added `--gap-opens INT` to control `bwa aln -o` in `ancient-fast` and `ancient-all` modes. The selected value is validated and recorded in logs and run configuration.
+
+### Changed
+
+- Ancient-mode mapping now explicitly uses `bwa aln -o 2` by default. Use `--gap-opens 1` to reproduce the implicit BWA default used by PlainMap v0.1.0-v0.2.1.
+
 ## v0.2.1 - 2026-10-07
 
 ### Added
