@@ -3,15 +3,18 @@
 This directory records the manifests, commands, parameters, and results for the
 original evaluation and the later scale, chunking, and AdaptClean tests. The
 original [`evaluation_results.tsv`](evaluation_results.tsv) and
-[`restart_checks.tsv`](restart_checks.tsv) are committed. Later run outputs
-under `evaluation_runs/` are ignored by Git; the large sequence files,
-reference genomes, BAMs, and newer result tables are not available in this
-repository. The scripts and instructions below document how to regenerate
-those results with the required input data.
+[`restart_checks.tsv`](restart_checks.tsv) are committed, as are the
+[released v0.3.0 mode results](z3_v030_28m_results.tsv) and their
+[input checksums](z3_v030_28m_input_checksums.tsv) and
+[run provenance](z3_v030_28m_provenance.tsv). Full run outputs under
+`evaluation_runs/` are ignored by Git; large FASTQs, reference genomes,
+BAMs, and other newer result tables are not in this repository. The scripts
+and instructions below document how to regenerate them with the required
+input data.
 
 The original manuscript table used PlainMap v0.1.0 and its samtools-only
 duplicate-removal policy. Check out the immutable `v0.1.0` tag for the exact
-PlainMap script version. The later hybrid-policy Z3 and cave hyena
+PlainMap script version. Some later hybrid-policy Z3 and cave hyena
 tests used a frozen script snapshot from November 5, 2026 (SHA-256
 `2723d9eed4ac2d39fe33af11c0cd2f3046362b2963f5632b1d2662daf91fedb6`).
 Its executable logic matches v0.3.0; only the version label and comments
@@ -26,6 +29,7 @@ v0.1 mapping and duplicate-removal methodology with v0.3.0, specify
 |---|---|---|
 | Original mapping modes and restart | Three million pilot fragments from a heterogeneous Japanese sea lion (Z3) manifest containing SE and PE FASTQs with SRA- and ENA-style headers; compare `modern`, `ancient-fast`, and `ancient-all`, then interrupt and resume a chunked `modern` run. | v0.1.0; [manifest](Z3_manifest_test.txt), [mapping-mode runner](run_mapping_mode.sh), [restart runner](run_restart_chunk_evaluation.sh), [reported results](evaluation_results.tsv), and [restart checks](restart_checks.tsv). |
 | Larger Z3 workload | 27,943,970 input fragments across the same three manifest units; compare unchunked processing with one-million-fragment chunks under `modern` mapping. | v0.1.0 and, separately, the v0.3.0-equivalent snapshot using hybrid duplicate removal; [input preparation](prepare_z3_10m_inputs.sh) and [benchmark runner](run_large_z3_benchmark.sh). Results from the two duplicate policies are not directly interchangeable. |
+| Released-version mode comparison | The same 27,943,970 Z3 fragments, processed without chunking in `modern`, `ancient-fast`, and `ancient-all` modes. | The exact v0.3.0 release with hybrid duplicate removal; [mode runner](run_z3_28m_modes.sh), [summary collector](summarize_z3_28m_modes.py), [results](z3_v030_28m_results.tsv), [input checksums](z3_v030_28m_input_checksums.tsv), and [run provenance](z3_v030_28m_provenance.tsv). |
 | Chunking diagnostics | Compare five- and ten-million-fragment chunks with unchunked runs; repeat unchunked runs and inspect stage checksums to locate count differences. A controlled fastp audit compares automatic with fixed adapters. | Snapshot for the larger-run diagnostics; v0.1.0 for the [fastp audit](run_fastp_chunk_audit.sh). See the [chunk-size sweep](run_z3_chunk_size_sweep.sh), [mapping diagnostic](run_z3_mapping_diagnostic.sh), and [repeat runner](run_z3_unchunked_repeat.sh). |
 | Short-read ancient sample | Fifty million pilot fragments from a single-end cave hyena library mapped in `ancient-fast` mode to striped hyena, with AdaptClean off versus on after fastp. | Snapshot; [runner](run_cavehyena_50m_adaptclean.sh) and [summary script](summarize_cavehyena_50m.sh). AdaptClean is not included in the Conda environment. |
 
@@ -45,9 +49,9 @@ The heterogeneous Z3 manifest contains:
 - one paired-end unit with explicit `/1` and `/2` header suffixes: `SRR25607804`
 
 The evaluated file order and names are stored in
-[`Z3_manifest_test.txt`](Z3_manifest_test.txt). The `SRR25607793_1M_1.fastq.gz` and
-`SRR25607793_1M_2.fastq.gz` files contain the first 1,000,000 mate pairs. Using complete
-mate files produces the same evaluated subset because PlainMap applies
+[`Z3_manifest_test.txt`](Z3_manifest_test.txt). Despite their `1M` filenames,
+`SRR25607793_1M_1.fastq.gz` and `SRR25607793_1M_2.fastq.gz` each contain
+1,125,000 reads. PlainMap uses their first 1,000,000 pairs because it applies
 `--pilot-fragments 1000000` independently to each unit, provided record order is
 preserved.
 
@@ -110,7 +114,7 @@ for mode in modern ancient-fast ancient-all; do
         --time=03:00:00 \
         --job-name="PM_${mode}" \
         --output="logs/PM_${mode}-%j.out" \
-        -- manuscript_evaluation/run_mapping_mode.sh "$mode"
+        --wrap="bash '$PWD/manuscript_evaluation/run_mapping_mode.sh' '$mode'"
 done
 ```
 
@@ -155,7 +159,7 @@ sbatch \
     --time=03:00:00 \
     --job-name=PM_restart \
     --output=logs/PM_restart-%j.out \
-    -- manuscript_evaluation/run_restart_chunk_evaluation.sh
+    --wrap="bash '$PWD/manuscript_evaluation/run_restart_chunk_evaluation.sh'"
 ```
 
 The output root defaults to `manuscript_evaluation/evaluation_runs/restart_chunk/` and can
@@ -165,8 +169,8 @@ free space.
 
 ## Results
 
-- [`evaluation_results.tsv`](evaluation_results.tsv) contains the values reported in the
-  combined manuscript table.
+- [`evaluation_results.tsv`](evaluation_results.tsv) contains the original
+  v0.1.0 evaluation values.
 - [`restart_checks.tsv`](restart_checks.tsv) records the interruption and checksum checks.
 
 The mapping modes intentionally process different read categories and should not be
@@ -209,7 +213,7 @@ PILOT_FRAGMENTS=10000000 CHUNK_SIZE=1000000 THREADS=16 \
   bash manuscript_evaluation/run_large_z3_benchmark.sh
 ```
 
-The same workload was also evaluated with a snapshot of the current PlainMap
+The same workload was also evaluated with a November 5 pre-release PlainMap
 script (`plainmap_current_20261105.sh`, SHA-256
 `2723d9eed4ac2d39fe33af11c0cd2f3046362b2963f5632b1d2662daf91fedb6`).
 This run explicitly uses `--dedup-method hybrid` with DeDup v0.12.9 for SE-like
@@ -243,6 +247,57 @@ first 1,000 R1 sequences found them identical, but their quality strings differ
 between the ENA-generated and SRA-derived files. Accordingly, the large workload
 tests scaling and chunking within its own two conditions; its mapping counts should
 not be interpreted as a direct extension of the original 3M-fragment table.
+
+## Released v0.3.0 mapping-mode comparison on larger Z3 input
+
+The [mode runner](run_z3_28m_modes.sh) uses the same validated 27,943,970-fragment
+manifest and reference as the larger Z3 scale test, with 16 threads,
+`--pilot-fragments 10000000`, no chunking, and hybrid duplicate removal in all
+three modes. Ancient modes use the v0.3.0 default `bwa aln -o 2`. The runner
+records the script and manifest hashes, tool versions, parameters, elapsed
+time, CPU time, and maximum process RSS; it checks each final BAM for
+integrity and for unmapped or duplicate-flagged records.
+
+To reproduce from the repository root after preparing `z3_10m_inputs/` and
+activating the Conda environment, set `REF` to the indexed California sea lion
+reference and run:
+
+```bash
+root="$PWD/manuscript_evaluation/evaluation_runs"
+mkdir -p "$root/z3_v030_28m_modes"
+git show v0.3.0:plainmap.sh > "$root/z3_v030_28m_modes/plainmap_v0.3.0.sh"
+export PLAINMAP="$root/z3_v030_28m_modes/plainmap_v0.3.0.sh"
+export MANIFEST="$root/z3_10m_inputs/manifest.txt"
+export REF=/path/to/GCF_009762305.2_mZalCal1.pri.v2_genomic.fna
+export DEDUP="$(command -v dedup)"
+export EVAL_ROOT="$root/z3_v030_28m_modes"
+export THREADS=16
+for mode in modern ancient-fast ancient-all; do
+  sbatch -c 16 --mem=48G --time=24:00:00 \
+    --job-name="PM28_${mode}" \
+    --output="$EVAL_ROOT/PM28_${mode}-%j.out" \
+    --export=ALL \
+    --wrap="bash '$PWD/manuscript_evaluation/run_z3_28m_modes.sh' '$mode'"
+done
+```
+
+After all three jobs complete, run
+`python3 manuscript_evaluation/summarize_z3_28m_modes.py "$EVAL_ROOT"` to write
+`summary.tsv`. The validated released-version run produced 71,089 unique
+mapped fragments in `modern`, 39,855 in `ancient-fast`, and 40,763 in
+`ancient-all`. Raw, trimmed, merged, and unpaired counts were identical across
+the three runs. All final BAMs passed `samtools quickcheck` and contained zero
+unmapped or duplicate-flagged records. [Results](z3_v030_28m_results.tsv)
+include wall time, CPU time, and maximum **process** RSS, which is not total
+node memory. These are single runs on different nodes, so runtime differences
+should not be treated as a controlled performance comparison between modes.
+The `endog` column is a fraction of raw fragments retained as unique mapped
+fragments, not an independent estimate of biological endogeneity.
+The input FASTQs, reference, and full run outputs are not committed to Git.
+The [input checksums](z3_v030_28m_input_checksums.tsv) are SHA-256 hashes of
+the compressed FASTQ files used in these runs. Tool versions, script hash,
+parameters, and Slurm job IDs are in the
+[run provenance](z3_v030_28m_provenance.tsv).
 
 ## Short-read cave hyena and AdaptClean evaluation
 

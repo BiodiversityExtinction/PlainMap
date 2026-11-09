@@ -1,0 +1,4 @@
+library_type	raw_fragments	trimmed_fragments	merged_reads	unpaired_reads	mapped_fragments_all	mapped_fragments_unique	duplicate_fragments	pe_duplicate_fragments	se_like_duplicate_fragments	endog	duprate	wall_seconds	user_cpu_seconds	system_cpu_seconds	max_process_rss_kb
+modern	27943970	27931189	15037416	1273	77109	71089	6020	2288	3732	0.002544	0.078071	842.88	8944.51	254.06	6252232
+ancient-fast	27943970	27931189	15037416	1273	42364	39855	2509	0	2509	0.001426	0.059225	1350.07	13533.45	351.06	5427404
+ancient-all	27943970	27931189	15037416	1273	43325	40763	2562	53	2509	0.001459	0.059134	1664.27	14386.21	499.00	7432196

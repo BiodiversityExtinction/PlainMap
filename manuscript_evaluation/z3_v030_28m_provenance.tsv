@@ -1,0 +1,28 @@
+field	value
+run_date	2026-11-09
+plainmap_tag	v0.3.0
+plainmap_sha256	adbeb8f15c8100938344ac012f68989b62095f406e381050d9dbec649d9dd492
+reference_assembly	GCF_009762305.2
+input_fastq_sha256	see z3_v030_28m_input_checksums.tsv
+raw_fragments	27943970
+pilot_fragments_per_unit	10000000
+max_reads_per_chunk	0
+threads	16
+minlength	30
+mapq	20
+dedup_method	hybrid
+run_adaptclean	off
+modern_aligner	bwa mem -t 16
+ancient_aligner	bwa aln -l 999 -n 0.01 -o 2 -t 16; samse or sampe by read class
+fastp_common_flags	-l 30 -g -w 16
+fastp_version	1.0.1
+bwa_version	0.7.17-r1188
+samtools_version	1.13
+dedup_version	0.12.9
+slurm_job_modern	230337
+slurm_job_ancient_fast	230338
+slurm_job_ancient_all	230339
+all_jobs_exit_status	0
+all_bams_quickcheck	PASS
+all_bams_unmapped_records	0
+all_bams_duplicate_flagged_records	0
