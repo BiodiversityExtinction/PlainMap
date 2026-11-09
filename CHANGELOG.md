@@ -2,6 +2,17 @@
 
 All notable changes to PlainMap will be documented here.
 
+## v0.3.0 - 2026-11-09
+
+### Added
+
+- Added opt-in `--run-adaptclean` for residual adapter cleanup of true single-end reads after fastp, with `--adaptclean CMD` for the external executable. Each processed chunk records its cycle length, adapter prefix, shortened-read count, and post-cleanup minimum-length removals in `SAMPLE.adaptclean.tsv`. Paired-end and merged reads are unchanged.
+- AdaptClean now infers one cycle length per original SE FASTQ from the longest supported raw read length, so pre-trimmed variable-length reads and pre-fastp chunking work together. If the maximum is insufficiently supported, it warns and skips AdaptClean for that file without skipping fastp.
+
+### Fixed
+
+- Resuming after an interruption during fastp preprocessing now rebuilds the complete pre-fastp chunk set before restarting preprocessing. Previously, delete-as-you-go could leave only unprocessed chunks, causing a resumed run to silently omit reads from chunks already trimmed before the interruption.
+
 ## v0.2.2 - 2026-11-01
 
 ### Added

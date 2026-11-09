@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# PlainMap v0.2.2
+# PlainMap v0.3.0
 # Lightweight, restartable mapping pipeline for ancient-fast, ancient-all, and modern DNA
 #
-# Key properties (current dev version):
+# Key properties:
 # - Manifest can contain mixed SE + PE, mixed platforms, mixed naming conventions
 # - SE/PE classification is derived from FASTQ headers:
 #     * Illumina/CASAVA: header contains ' 1:' / ' 2:'
@@ -39,7 +39,7 @@ fi
 ###############################################################################
 # DEFAULTS
 ###############################################################################
-VERSION="0.2.2"
+VERSION="0.3.0"
 
 THREADS=1
 MINLEN=30
@@ -55,6 +55,7 @@ EMIT_UNMAPPED_FASTQ=0      # 1 exports unmapped reads to FASTQ without changing 
 ADAPTER_R1=""
 ADAPTER_R2=""
 TRIM_ONLY=0
+RUN_ADAPTCLEAN=0
 
 # mapDamage toggle (default OFF for all library types)
 RUN_MAPDAMAGE=0
@@ -70,6 +71,7 @@ TMPDIR_USER=""
 RESET=0
 
 FASTP=${FASTP:-fastp}
+ADAPTCLEAN=${ADAPTCLEAN:-AdaptClean}
 BWA=${BWA:-bwa}
 SAMTOOLS=${SAMTOOLS:-samtools}
 DEDUP=${DEDUP:-dedup}
@@ -107,7 +109,8 @@ Optional:
   --pilot-fragments INT                      (default: 0; disabled) PER-UNIT cap on fragments before fastp
   --adapter-r1 SEQ
   --adapter-r2 SEQ
-  --trim-only                                Trim only (fastp); exit before mapping
+  --run-adaptclean                           Clean residual adapter from true SE reads after fastp (default OFF)
+  --trim-only                                Trim only (fastp and optional AdaptClean); exit before mapping
   --run-mapdamage                            Run mapDamage (any library type; default OFF)
   --mapdamage-serial                         Disable automatic contig-split mapDamage parallelization
   --tmpdir DIR                               Custom temp dir (e.g. node-local scratch)
@@ -120,6 +123,7 @@ Optional:
 
 Tool overrides:
   --fastp CMD
+  --adaptclean CMD
   --bwa CMD
   --samtools CMD
   --dedup CMD
@@ -171,6 +175,7 @@ while [[ $# -gt 0 ]]; do
     --pilot-fragments) need_arg "$1" "${2-}"; PILOT_FRAGMENTS="$2"; shift 2 ;;
     --adapter-r1) need_arg "$1" "${2-}"; ADAPTER_R1="$2"; shift 2 ;;
     --adapter-r2) need_arg "$1" "${2-}"; ADAPTER_R2="$2"; shift 2 ;;
+    --run-adaptclean) RUN_ADAPTCLEAN=1; shift ;;
     --trim-only) TRIM_ONLY=1; shift ;;
     --run-mapdamage) RUN_MAPDAMAGE=1; shift ;;
     --no-mapdamage) RUN_MAPDAMAGE=0; shift ;;                  # backward-compatible no-op
@@ -185,6 +190,7 @@ while [[ $# -gt 0 ]]; do
     --validate) VALIDATE_ONLY=1; shift ;;
     --reset) RESET=1; shift ;;
     --fastp) need_arg "$1" "${2-}"; FASTP="$2"; shift 2 ;;
+    --adaptclean) need_arg "$1" "${2-}"; ADAPTCLEAN="$2"; shift 2 ;;
     --bwa) need_arg "$1" "${2-}"; BWA="$2"; shift 2 ;;
     --samtools) need_arg "$1" "${2-}"; SAMTOOLS="$2"; shift 2 ;;
     --dedup) need_arg "$1" "${2-}"; DEDUP="$2"; shift 2 ;;
@@ -273,6 +279,7 @@ REPORTS="$OUT/${SAMPLE}/fastp_reports"
 DEDUP_REPORTS="$OUT/${SAMPLE}/dedup_reports"
 
 STATS="$OUT/${SAMPLE}.plainmap.stats.tsv"
+ADAPTCLEAN_REPORT="$OUT/${SAMPLE}.adaptclean.tsv"
 COV_TSV="$OUT/${SAMPLE}.plainmap.coverage.tsv"
 OUT_BAM="$OUT/${SAMPLE}.final.RG.bam"
 RUN_CONFIG="$OUT/${SAMPLE}.plainmap.run-config.tsv"
@@ -376,7 +383,7 @@ if [[ $RESET -eq 1 ]]; then
   log "Reset requested: restarting from scratch for sample $SAMPLE"
   rm -rf "$WORK" "$REPORTS" "$DEDUP_REPORTS" "$OUT/${SAMPLE}_mapdamage" 2>/dev/null || true
   rm -f "$OUT/${SAMPLE}.final.RG.bam" "$OUT/${SAMPLE}.final.RG.bam.bai" \
-        "$STATS" "$COV_TSV" "$RUN_CONFIG" \
+        "$STATS" "$COV_TSV" "$RUN_CONFIG" "$ADAPTCLEAN_REPORT" \
         "$UNMAPPED_R1_FQ" "$UNMAPPED_R2_FQ" "$UNMAPPED_SE_FQ" 2>/dev/null || true
   rm -f "$CKPT/${SAMPLE}."*.done "$RAW_META" "$PE_IDLIST" "$SE_IDLIST" 2>/dev/null || true
   mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$MDCHUNKS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS" "$DEDUP_REPORTS"
@@ -393,6 +400,7 @@ quick_preflight() {
   [[ -r "$REF" ]] || die "Reference not readable: $REF"
   require_cmd split
   require_cmd "$FASTP"; require_cmd "$BWA"; require_cmd "$SAMTOOLS"; require_cmd "$PYTHON"
+  [[ $RUN_ADAPTCLEAN -eq 0 ]] || require_cmd "$ADAPTCLEAN"
   [[ "$DEDUP_METHOD" == "samtools" ]] || require_cmd "$DEDUP"
   check_split_filter_support
   if [[ $HAVE_PIGZ -eq 1 ]]; then
@@ -441,6 +449,7 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  minlength:           $MINLEN"
   log "  mismatch (aln):      $MISMATCH"
   log "  gap_opens (aln):     $GAP_OPENS"
+  log "  run_adaptclean:      $RUN_ADAPTCLEAN"
   log "  mapq:                $MAPQ"
   log "  emit_unmapped_fastq: $EMIT_UNMAPPED_FASTQ"
   log "  pilot_fragments:     $PILOT_FRAGMENTS (PER-UNIT cap)"
@@ -448,7 +457,7 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  run_mapdamage:       $RUN_MAPDAMAGE (any library type)"
   log "  dedup_method:        $DEDUP_METHOD"
   log "  delete_as_you_go:    $DELETE_AS_YOU_GO"
-  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> pool -> mapchunk -> map (per-chunk resume) -> merge (-f overwrite) -> dedup ($DEDUP_METHOD) -> RG -> (mapDamage optional) -> coverage -> stats"
+  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> (AdaptClean for true SE optional) -> pool -> mapchunk -> map (per-chunk resume) -> merge (-f overwrite) -> dedup ($DEDUP_METHOD) -> RG -> (mapDamage optional) -> coverage -> stats"
   exit 0
 fi
 
@@ -487,7 +496,7 @@ write_run_config() {
   ref_identity="$(file_identity "$REF")"
 
   {
-    printf 'config_schema\t4\n'
+    printf 'config_schema\t5\n'
     printf 'plainmap_version\t%s\n' "$VERSION"
     printf 'plainmap_script\t%s\n' "$script_path"
     printf 'plainmap_script_sha256\t%s\n' "$script_hash"
@@ -509,6 +518,7 @@ write_run_config() {
     printf 'pilot_fragments\t%s\n' "$PILOT_FRAGMENTS"
     printf 'adapter_r1\t%s\n' "${ADAPTER_R1:-<auto>}"
     printf 'adapter_r2\t%s\n' "${ADAPTER_R2:-<auto>}"
+    printf 'run_adaptclean\t%s\n' "$RUN_ADAPTCLEAN"
     printf 'trim_only\t%s\n' "$TRIM_ONLY"
     printf 'run_mapdamage\t%s\n' "$RUN_MAPDAMAGE"
     printf 'mapdamage_serial\t%s\n' "$MAPDAMAGE_SERIAL"
@@ -517,6 +527,7 @@ write_run_config() {
     printf 'resume\t%s\n' "$RESUME"
     printf 'delete_as_you_go\t%s\n' "$DELETE_AS_YOU_GO"
     printf 'fastp\t%s\n' "$FASTP"
+    printf 'adaptclean\t%s\n' "$ADAPTCLEAN"
     printf 'bwa\t%s\n' "$BWA"
     printf 'samtools\t%s\n' "$SAMTOOLS"
     printf 'dedup\t%s\n' "$DEDUP"
@@ -609,6 +620,9 @@ log_run_configuration() {
   log "  reset:               $RESET"
   log "  trim_only:           $TRIM_ONLY"
   log "  fastp:               $FASTP"
+  log "  run_adaptclean:      $RUN_ADAPTCLEAN"
+  [[ $RUN_ADAPTCLEAN -eq 0 ]] || log "  adaptclean:          $ADAPTCLEAN"
+  [[ $RUN_ADAPTCLEAN -eq 0 ]] || log "WARNING: AdaptClean can remove genuine terminal bases from full-cycle SE reads when 1-base adapter-prefix matches occur"
   log "  bwa:                 $BWA"
   log "  samtools:            $SAMTOOLS"
   [[ "$DEDUP_METHOD" == "hybrid" ]] && log "  dedup:               $DEDUP" || log "  dedup:               (not used)"
@@ -699,6 +713,93 @@ run_fastp() {
 FASTP_ARGS=( -l "$MINLEN" -g -w "$THREADS" )
 [[ -n "$ADAPTER_R1" ]] && FASTP_ARGS+=( --adapter_sequence "$ADAPTER_R1" )
 [[ -n "$ADAPTER_R2" ]] && FASTP_ARGS+=( --adapter_sequence_r2 "$ADAPTER_R2" )
+
+infer_se_cycle_length() {
+  local raw_se="$1"
+  "${ZCAT[@]}" "$raw_se" | awk '
+    NR % 4 == 2 {
+      read_length = length($0)
+      counts[read_length]++
+      if (read_length > maximum) maximum = read_length
+      total++
+    }
+    END {
+      if (!total) exit 1
+      printf "%.0f %.0f %.0f\n", maximum, total, counts[maximum]
+    }
+  '
+}
+
+adaptclean_se_chunk() {
+  local cycle="$1" fastp_se="$2" fastp_json="$3" cleaned="$4" filtered="$5"
+  local adapter stats
+
+  adapter=$("$PYTHON" - "$fastp_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as stream:
+    value = json.load(stream).get("adapter_cutting", {}).get("read1_adapter_sequence", "")
+adapter = value.upper()[:5]
+if len(adapter) != 5 or any(base not in "ACGT" for base in adapter):
+    sys.exit("fastp did not report a usable SE adapter; specify --adapter-r1 or disable --run-adaptclean")
+print(adapter)
+PY
+  ) || die "AdaptClean cannot determine the SE adapter from $fastp_json"
+
+  "$ADAPTCLEAN" "$fastp_se" "$cleaned" "$cycle" "$adapter" || die "AdaptClean failed for $fastp_se"
+  file_nonempty "$cleaned" || die "AdaptClean output missing/empty: $cleaned"
+
+  stats=$("$PYTHON" - "$fastp_se" "$cleaned" "$filtered" "$MINLEN" <<'PY'
+import gzip
+import itertools
+import sys
+
+original, cleaned, output, min_length = sys.argv[1:]
+min_length = int(min_length)
+
+def records(path):
+    with gzip.open(path, "rt") as stream:
+        while header := stream.readline():
+            sequence = stream.readline()
+            plus = stream.readline()
+            quality = stream.readline()
+            if not header.startswith("@") or not sequence or not plus.startswith("+") or not quality or len(sequence.rstrip("\n\r")) != len(quality.rstrip("\n\r")):
+                raise ValueError(f"Invalid FASTQ record in {path}")
+            yield header, sequence, plus, quality
+
+total = shortened = removed = kept = 0
+with gzip.open(output, "wt") as destination:
+    for before, after in itertools.zip_longest(records(original), records(cleaned)):
+        if before is None or after is None:
+            raise ValueError("AdaptClean changed the number of FASTQ records")
+        if before[0] != after[0] or before[2] != after[2]:
+            raise ValueError("AdaptClean changed FASTQ headers or record order")
+        old_seq, new_seq = before[1].rstrip("\n\r"), after[1].rstrip("\n\r")
+        old_qual, new_qual = before[3].rstrip("\n\r"), after[3].rstrip("\n\r")
+        if not old_seq.startswith(new_seq) or not old_qual.startswith(new_qual):
+            raise ValueError("AdaptClean changed bases or qualities other than terminal trimming")
+        total += 1
+        shortened += len(new_seq) < len(old_seq)
+        if len(new_seq) < min_length:
+            removed += 1
+        else:
+            destination.writelines(after)
+            kept += 1
+
+print(total, shortened, removed, kept, sep="\t")
+PY
+  ) || die "AdaptClean output validation/filtering failed for $fastp_se"
+  printf '%s\t%s\n' "$adapter" "$stats"
+}
+
+count_reads_at_length() {
+  local fastq="$1" read_length="$2"
+  "${ZCAT[@]}" "$fastq" | awk -v target="$read_length" '
+    NR % 4 == 2 && length($0) == target { count++ }
+    END { printf "%.0f\n", count }
+  '
+}
 
 ###############################################################################
 # JSON HELPERS (robust across fastp schemas)
@@ -985,11 +1086,14 @@ else: print(min(c,p))
 PY
 }
 
-chunks_exist() {
-  shopt -s nullglob
-  local a=( "$CHUNKS/${SAMPLE}."*.fastq.gz )
-  [[ ${#a[@]} -gt 0 ]]
-}
+POOL_PE_R1="$RAW/${SAMPLE}.pool.PE.R1.fastq.gz"
+POOL_PE_R2="$RAW/${SAMPLE}.pool.PE.R2.fastq.gz"
+POOL_SE_ALL="$RAW/${SAMPLE}.pool.SE.all.fastq.gz"
+need_fastp_files=( "$RAW_META" "$POOL_SE_ALL" )
+if [[ "$SEQ_MODE" != "SE" ]]; then
+  need_fastp_files+=( "$POOL_PE_R1" "$POOL_PE_R2" )
+fi
+[[ $RUN_ADAPTCLEAN -eq 0 ]] || need_fastp_files+=( "$ADAPTCLEAN_REPORT" )
 
 ###############################################################################
 # STEP 1: CREATE PRE-FASTP CHUNKS PER UNIT (PE stays paired)
@@ -1041,9 +1145,9 @@ make_chunks() {
   ckpt_mark chunk
 }
 
-# BUGFIX: only skip chunking if checkpoint exists AND chunks still exist.
-if [[ $RESUME -eq 1 && -f "$(ckpt_file chunk)" && chunks_exist ]]; then
-  log "STEP: pre-fastp chunking (skipped; checkpoint present + chunks exist)"
+# Partial trimming may have deleted some input chunks. Never reuse that incomplete set.
+if ckpt_ok fastp_pool "${need_fastp_files[@]}"; then
+  log "STEP: pre-fastp chunking (skipped; fastp+pool checkpoint complete)"
 else
   make_chunks
 fi
@@ -1051,10 +1155,6 @@ fi
 ###############################################################################
 # STEP 2: FASTP PER PRE-FASTP CHUNK -> POOL TRIMMED OUTPUTS
 ###############################################################################
-POOL_PE_R1="$RAW/${SAMPLE}.pool.PE.R1.fastq.gz"
-POOL_PE_R2="$RAW/${SAMPLE}.pool.PE.R2.fastq.gz"
-POOL_SE_ALL="$RAW/${SAMPLE}.pool.SE.all.fastq.gz"
-
 run_fastp_and_pool() {
   log "STEP: fastp per unit-chunk (JSON only) + pooling (unmerged PE separate from SE-like)"
   ckpt_clear fastp_pool
@@ -1062,6 +1162,9 @@ run_fastp_and_pool() {
   : > "$POOL_PE_R1"
   : > "$POOL_PE_R2"
   : > "$POOL_SE_ALL"
+  if [[ $RUN_ADAPTCLEAN -eq 1 ]]; then
+    printf 'unit\tchunk\tcycle_length\tadapter_prefix\tfastp_reads\tshortened_reads\tremoved_below_minlength\tpooled_reads\n' > "$ADAPTCLEAN_REPORT"
+  fi
 
   local RAW_R1_READS=0
   local RAW_R2_READS=0
@@ -1072,6 +1175,26 @@ run_fastp_and_pool() {
   local UNPAIRED_READS=0
 
   declare -A PILOT_LEFT_BY_UNIT
+  declare -A SE_CYCLE_BY_UNIT
+  if [[ $RUN_ADAPTCLEAN -eq 1 ]]; then
+    local se_index=0 se_file se_unit cycle total support required inference
+    for se_file in "${SE_FILES[@]}"; do
+      se_unit="${SAMPLE}.SE$(printf '%04d' "$se_index")"
+      inference=$(infer_se_cycle_length "$se_file") || die "Cannot inspect SE read lengths: $se_file"
+      read -r cycle total support <<< "$inference"
+      [[ -n "$cycle" && -n "$total" && -n "$support" ]] || die "Cannot infer SE read lengths: $se_file"
+      required=$(( (total + 9999) / 10000 ))
+      (( required >= 2 )) || required=2
+      if (( support < required )); then
+        SE_CYCLE_BY_UNIT["$se_unit"]=0
+        log "WARNING: AdaptClean skipped for $se_unit: longest raw read length $cycle occurs in only $support/$total reads (need at least $required); cannot infer a reliable cycle length"
+      else
+        SE_CYCLE_BY_UNIT["$se_unit"]="$cycle"
+        log "  AdaptClean cycle for $se_unit: $cycle bp ($support/$total raw reads at this length)"
+      fi
+      se_index=$((se_index + 1))
+    done
+  fi
   shopt -s nullglob
 
   # PE chunks
@@ -1246,15 +1369,47 @@ run_fastp_and_pool() {
       -i "$in_se" --out1 "$trim_se" \
       -j "$fp_json" --html "$fp_html"
 
-    file_nonempty "$trim_se" || die "fastp produced empty trimmed SE for $tag"
-    cat "$trim_se" >> "$POOL_SE_ALL"
-
     local se_after
     se_after=$(json_get_int_any "$fp_json" "read1_after_filtering.total_reads" "summary.after_filtering.total_reads")
     [[ "$se_after" -le 0 ]] && se_after=$(count_reads_fastq_gz "$trim_se")
+    file_nonempty "$trim_se" || die "fastp produced empty trimmed SE for $tag"
+
+    local se_for_pool="$trim_se" adapt_raw="" adapt_filtered="" adapt_stats=""
+    if [[ $RUN_ADAPTCLEAN -eq 1 ]]; then
+      local cycle="${SE_CYCLE_BY_UNIT[$unit_id]:-}"
+      [[ -n "$cycle" ]] || die "Missing AdaptClean cycle estimate for $unit_id"
+      local eligible=0 report_cycle="$cycle"
+      if (( cycle > 0 )); then
+        eligible=$(count_reads_at_length "$trim_se" "$cycle") || die "Cannot count full-cycle reads in $trim_se"
+      fi
+      if (( cycle == 0 || eligible == 0 )); then
+        if (( cycle == 0 )); then
+          report_cycle="NA"
+        else
+          log "  AdaptClean skipped for $tag: no reads remain at the inferred $cycle bp cycle length after fastp"
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$unit_id" "$tag" "$report_cycle" "NA" "$se_after" 0 0 "$se_after" >> "$ADAPTCLEAN_REPORT"
+      else
+        adapt_raw="$TMP/${SAMPLE}.${tag}.adaptclean.raw.fastq.gz"
+        adapt_filtered="$TMP/${SAMPLE}.${tag}.adaptclean.filtered.fastq.gz"
+        if ! adapt_stats=$(adaptclean_se_chunk "$cycle" "$trim_se" "$fp_json" "$adapt_raw" "$adapt_filtered"); then
+          die "AdaptClean preprocessing failed for $tag (see error output above)"
+        fi
+        local adapter fastp_reads shortened removed kept
+        IFS=$'\t' read -r adapter fastp_reads shortened removed kept <<< "$adapt_stats"
+        [[ "$fastp_reads" -eq "$se_after" ]] || die "fastp report and AdaptClean input counts disagree for $tag ($se_after vs $fastp_reads)"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$unit_id" "$tag" "$cycle" "$adapter" "$fastp_reads" "$shortened" "$removed" "$kept" >> "$ADAPTCLEAN_REPORT"
+        log "  AdaptClean true SE $tag: cycle=$cycle adapter-prefix=$adapter shortened=$shortened dropped-below-$MINLEN=$removed kept=$kept"
+        se_for_pool="$adapt_filtered"
+        se_after="$kept"
+      fi
+    fi
+    cat "$se_for_pool" >> "$POOL_SE_ALL"
     TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$se_after")
 
-    rm -f "$trim_se" 2>/dev/null || true
+    rm -f "$trim_se" "$adapt_raw" "$adapt_filtered" 2>/dev/null || true
     [[ -n "$lim_se" ]] && rm -f "$lim_se" 2>/dev/null || true
 
     if [[ $DELETE_AS_YOU_GO -eq 1 ]]; then
@@ -1272,11 +1427,6 @@ run_fastp_and_pool() {
   ckpt_mark fastp_pool
   log "fastp+pool complete. Raw counts written: $RAW_META"
 }
-
-need_fastp_files=( "$RAW_META" "$POOL_SE_ALL" )
-if [[ "$SEQ_MODE" != "SE" ]]; then
-  need_fastp_files+=( "$POOL_PE_R1" "$POOL_PE_R2" )
-fi
 
 if ! ckpt_ok fastp_pool "${need_fastp_files[@]}"; then
   run_fastp_and_pool

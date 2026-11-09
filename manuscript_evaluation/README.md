@@ -4,7 +4,7 @@ This directory records the manifest, commands, parameters, and expected results 
 the PlainMap manuscript evaluation. Sequence data and the 2.44 GB reference FASTA are not
 committed to the repository.
 
-These results used PlainMap v0.1.0 and its samtools-only duplicate-removal policy. Check
+The original manuscript table used PlainMap v0.1.0 and its samtools-only duplicate-removal policy. Check
 out the immutable `v0.1.0` tag for exact software-version reproduction. PlainMap v0.2.0
 uses class-specific DeDup and samtools duplicate handling and will not reproduce the same
 duplicate statistics. In v0.2.2 and later, retain the v0.1 mapping and duplicate-removal
@@ -149,3 +149,107 @@ interpreted as competing estimates of alignment accuracy. Adaptive chunking is a
 memory-safety option: in this evaluation it reduced peak resident memory but increased I/O
 and produced a small change in fastp output because adapter inference occurred separately
 for each pre-trimming chunk.
+
+In a separate controlled fastp audit, automatic adapter detection produced
+1,124,015 trimmed fragments without chunking and 1,123,944 with chunking.
+Using the same fixed adapter sequences in both conditions produced 1,124,015
+trimmed fragments in each, supporting adapter inference as the source of that
+specific count difference. This does not establish that every downstream
+alignment difference has the same cause. The `max_rss_kb` field in the larger
+benchmark is GNU `time`'s maximum process RSS, not the aggregate peak memory of
+all concurrent processes on the node.
+
+## Larger Z3 scale evaluation
+
+`prepare_z3_10m_inputs.sh` prepares the first 10,000,000 reads from the Z3 single-end
+run and the first 10,000,000 mate pairs from `SRR25607793`. It uses the complete
+`SRR25607804` pair, which has 7,943,970 pairs. Thus the workload contains
+27,943,970 input fragments across three units, about 9.3 times the original table's
+3,000,000. The two `SRR25607793` FASTQs are fetched as bounded ranges from ENA
+because the local full copies are truncated. The preparer validates gzip integrity,
+exact subset counts, and paired read IDs, and writes source URLs and subset SHA-256
+checksums to `evaluation_runs/z3_10m_inputs/provenance.tsv`.
+
+The large run uses the immutable v0.1.0 script, modern mode, 16 threads, and both
+unchunked and 1,000,000-read pre-fastp chunked conditions. The two runs share the
+same input manifest and reference. Run preparation and evaluation with:
+
+```bash
+bash manuscript_evaluation/prepare_z3_10m_inputs.sh
+PLAINMAP="$PWD/manuscript_evaluation/evaluation_runs/plainmap_v0.1.0.sh" \
+MANIFEST="$PWD/manuscript_evaluation/evaluation_runs/z3_10m_inputs/manifest.txt" \
+REF=/path/to/GCF_009762305.2_mZalCal1.pri.v2_genomic.fna \
+EVAL_ROOT="$PWD/manuscript_evaluation/evaluation_runs/large_z3_10m" \
+PILOT_FRAGMENTS=10000000 CHUNK_SIZE=1000000 THREADS=16 \
+  bash manuscript_evaluation/run_large_z3_benchmark.sh
+```
+
+The same workload was also evaluated with a snapshot of the current PlainMap
+script (`plainmap_current_20261105.sh`, SHA-256
+`2723d9eed4ac2d39fe33af11c0cd2f3046362b2963f5632b1d2662daf91fedb6`).
+This run explicitly uses `--dedup-method hybrid` with DeDup v0.12.9 for SE-like
+reads; AdaptClean remains off. It is a separate evaluation, not a direct
+version-to-version mapping-count comparison, because duplicate handling changed.
+The `provenance.tsv` written in each output root records the script, tools, and
+settings actually used. On the cluster, the current-code run was submitted as:
+
+```bash
+root="$PWD/manuscript_evaluation/evaluation_runs"
+PLAINMAP="$root/plainmap_current_20261105.sh" \
+MANIFEST="$root/z3_10m_inputs/manifest.txt" \
+REF=/home/people/micwe/Biodiversity_Extinction/Japanese_sea_lion/Reference_genomes/GCF_009762305.2_mZalCal1.pri.v2_genomic.fna \
+EVAL_ROOT="$root/large_z3_current" \
+PILOT_FRAGMENTS=10000000 CHUNK_SIZE=1000000 THREADS=16 \
+DEDUP_METHOD=hybrid DEDUP="$root/tools/dedup-release" \
+  sbatch -c 16 --mem=48G --time=24:00:00 -J PM_Z3_current \
+    --output="$root/PM_Z3_current-%j.out" --export=ALL \
+    -- manuscript_evaluation/run_large_z3_benchmark.sh
+```
+
+The pinned DeDup wrapper invokes the official DeDup v0.12.9 JAR with Java 17.
+These locally staged tool binaries and FASTQs are not committed to Git; the
+runner and input-preparation scripts are included for reproducibility.
+
+The ENA-generated `SRR25607793` FASTQs preserve the sequence reads but have `/1`
+and `/2` mate markers in the header's second field. The original 1M-pair evaluation
+used SRA-derived FASTQs with identical full headers across mates, so that earlier
+test remains the direct check of SRA-style header fallback. A comparison of the
+first 1,000 R1 sequences found them identical, but their quality strings differ
+between the ENA-generated and SRA-derived files. Accordingly, the large workload
+tests scaling and chunking within its own two conditions; its mapping counts should
+not be interpreted as a direct extension of the original 3M-fragment table.
+
+## Short-read cave hyena and AdaptClean evaluation
+
+`run_cavehyena_50m_adaptclean.sh` compares 50,000,000 pilot fragments from the
+single-end ancient cave hyena sample `Ccsp043` against the indexed striped hyena
+assembly `GCF_003009895.1`. The two conditions use the same raw FASTQ, PlainMap
+snapshot, `ancient-fast` mapping mode, hybrid deduplication, and 16 threads. Task
+The `off` run uses fastp alone; the `on` run additionally applies AdaptClean to
+fastp's true SE output.
+Pre-trimming chunking is disabled in both conditions. The first 10,000 raw reads
+sampled were all 76 bp. In a separate 100,000-read preflight, fastp retained
+59,595 reads, of which AdaptClean shortened 2,171; this confirms that the
+comparison has a measurable adapter-cleaning intervention before scaling up.
+
+Run from the repository root after staging the pinned DeDup and AdaptClean tools
+under `manuscript_evaluation/evaluation_runs/tools/`:
+
+```bash
+root="$PWD/manuscript_evaluation/evaluation_runs"
+mkdir -p "$root"
+for condition in off on; do
+  sbatch -c 16 --mem=48G --time=48:00:00 \
+    -J "PM_Ccsp043_$condition" --output="$root/PM_Ccsp043_$condition-%j.out" \
+    -- manuscript_evaluation/run_cavehyena_50m_adaptclean.sh "$condition"
+done
+```
+
+Outputs default to `evaluation_runs/cavehyena_50m_adaptclean/{off,on}/`. Each
+condition records its input paths, software hashes, parameters, wall/CPU time,
+PlainMap statistics, AdaptClean report when enabled, and a histogram of
+post-trimming read lengths. GNU `time`'s `max_rss_kb` is maximum process RSS,
+not aggregate node memory. The full input FASTQ and reference are not tracked
+in Git. Once both runs complete, `summarize_cavehyena_50m.sh` writes a compact
+`comparison.tsv` from their validated statistics, timing files, and length
+histograms.

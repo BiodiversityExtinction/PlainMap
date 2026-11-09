@@ -7,6 +7,8 @@ on:
 jobs:
   smoke-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Check out repository
@@ -35,5 +37,39 @@ jobs:
           sudo chmod 0755 /usr/local/bin/dedup
           dedup --version
 
+          git clone --quiet --depth 1 https://github.com/bilalbioinfo/AdaptClean.git "$RUNNER_TEMP/AdaptClean"
+          git -C "$RUNNER_TEMP/AdaptClean" fetch --quiet --depth 1 origin 3fffb7b60e2032f4b2ed4203c320cfed1ccea868
+          git -C "$RUNNER_TEMP/AdaptClean" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/AdaptClean" rev-parse HEAD)" = 3fffb7b60e2032f4b2ed4203c320cfed1ccea868
+          make -C "$RUNNER_TEMP/AdaptClean"
+          sudo install -m 0755 "$RUNNER_TEMP/AdaptClean/bin/AdaptClean" /usr/local/bin/AdaptClean
+
       - name: Run smoke and regression tests
         run: bash tests/run_tests.sh
+
+  publish-release:
+    needs: smoke-test
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Publish tested release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          awk -v tag="$GITHUB_REF_NAME" '
+            /^## / {
+              if (found) exit
+              if ($2 == tag) { found=1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "PlainMap $GITHUB_REF_NAME" \
+            --notes-file release-notes.md

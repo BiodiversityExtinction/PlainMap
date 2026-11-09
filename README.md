@@ -4,7 +4,7 @@ PlainMap is a lightweight, restartable mapping pipeline for modern and degraded 
 
 PlainMap is implemented as a **single Bash script** and focuses on preprocessing, mapping, duplicate handling, BAM generation, and summary statistics without requiring a workflow engine or complex configuration system.
 
-Current version: **v0.2.2**
+Current version: **v0.3.0**
 
 ---
 
@@ -84,10 +84,15 @@ All tools must be available on PATH unless overridden via flags.
 
 - [DeDup](https://github.com/apeltzer/DeDup) 0.12.9 or later (required for the default `--dedup-method hybrid`; not required for `samtools`)
 - mapDamage (required only if `--run-mapdamage` is used)
+- [AdaptClean](https://github.com/bilalbioinfo/AdaptClean) (required only with `--run-adaptclean`)
 
 DeDup can be installed from Bioconda:
 
     conda install -c conda-forge -c bioconda dedup
+
+AdaptClean currently builds from its source repository with `make`, producing
+`bin/AdaptClean`. Provide that executable with `--adaptclean /path/to/bin/AdaptClean`
+if it is not on `PATH`. PlainMap does not bundle AdaptClean.
 
 ---
 
@@ -188,6 +193,10 @@ before preprocessing or mapping and reports the changed fields. Argument order a
 explicit default versus an omitted default do not cause a mismatch. Use `--reset` to
 intentionally discard the previous run and accept a new configuration.
 
+If preprocessing is interrupted before its checkpoint completes, PlainMap reconstructs
+the full set of input chunks from the original FASTQs and reruns preprocessing from the
+beginning. Completed mapping chunks are reused separately after a mapping interruption.
+
 Runs created by older PlainMap versions do not have a configuration file and cannot be
 safely resumed. Use `--reset`, or select a new prefix, for the first run with configuration
 tracking.
@@ -197,6 +206,31 @@ tracking.
 - `modern`: maps unmerged paired-end reads as paired-end with `bwa mem`, and maps SE-like reads as single-end.
 - `ancient-fast`: maps only SE-like reads (merged reads, unpaired reads, and true single-end reads) with `bwa aln + samse`.
 - `ancient-all`: maps both unmerged paired-end reads with `bwa aln + sampe` and SE-like reads with `bwa aln + samse`.
+
+### Optional Residual Adapter Cleanup
+
+`--run-adaptclean` applies the external AdaptClean executable to **true single-end FASTQ
+units only**, after fastp and before reads are pooled. It does not process merged reads,
+unpaired reads derived from paired-end units, or paired-end mates. PlainMap scans each
+original SE FASTQ once for cycle inference (an extra input scan) and uses its
+longest raw read length as the candidate cycle length for every chunk from that
+file. Shorter raw reads are allowed. The candidate
+must occur in at least two reads and at least 0.01% of the file; otherwise PlainMap
+warns and skips AdaptClean for that file while continuing with fastp. PlainMap takes
+a five-base adapter prefix from each chunk's fastp report. If fastp cannot identify
+an adapter, specify `--adapter-r1 SEQ` or leave AdaptClean disabled. The post-cleanup
+`--minlength` filter and read counts are recorded in `SAMPLE.adaptclean.tsv`; `NA`
+for cycle length means uncertain inference, while `NA` for adapter prefix with a
+numeric cycle means that chunk had no full-length reads remaining after fastp.
+
+AdaptClean selects reads that still have the **full raw sequencing-cycle length after
+fastp**. It can remove a genuine terminal base when a full-length read happens to end
+with the first adapter base (and similarly for longer chance matches). It is therefore
+off by default; compare results with and without it before using cleaned data for
+downstream inference. If a FASTQ mixes multiple sequencing-cycle lengths, only reads
+at the inferred maximum are eligible for AdaptClean; shorter cycles cannot be
+distinguished reliably from pre-trimmed reads. It does not establish that a read is
+endogenous.
 
 ## Parameters
 
@@ -225,6 +259,7 @@ Optional parameters:
 | `--pilot-fragments INT` | `0` | Per-unit read/fragment cap before fastp (`0` disables pilot mode). |
 | `--adapter-r1 SEQ` | auto | Explicit adapter for read 1. |
 | `--adapter-r2 SEQ` | auto | Explicit adapter for read 2. |
+| `--run-adaptclean` | off | After fastp, run AdaptClean on true single-end reads only. Infers one cycle length per original SE file from a supported maximum raw length, then uses the first five bases of fastp's detected adapter. Skips files with an uncertain cycle length; an undetected adapter is an error. Reads shortened below `--minlength` are removed. |
 | `--trim-only` | off | Run trimming/pooling and exit before mapping. |
 | `--run-mapdamage` | off | Run mapDamage on final BAM. With `--threads` > 1 and more than one contig has mapped reads, the BAM is split by whole contig and scanned by mapDamage in parallel, then results are merged before final plotting; mapDamage itself is never modified, and the count tables are numerically equivalent to a single-process run. |
 | `--mapdamage-serial` | off | Force the original single-process mapDamage behavior even when `--threads` > 1. |
@@ -241,6 +276,7 @@ Tool override parameters:
 | Parameter | Description |
 |---|---|
 | `--fastp CMD` | fastp executable/command to use. |
+| `--adaptclean CMD` | AdaptClean executable/command to use when `--run-adaptclean` is enabled. |
 | `--bwa CMD` | bwa executable/command to use. |
 | `--samtools CMD` | samtools executable/command to use. |
 | `--dedup CMD` | DeDup executable/command to use. This is a tool-path override, not a method selector. |
@@ -399,9 +435,9 @@ PlainMap provides two duplicate-removal policies:
 - `hybrid` (default): merged, unpaired, and true single-end reads are pooled as SE-like reads and processed by DeDup with `--merged`; unmerged paired-end reads are processed separately with samtools `fixmate` and `markdup`. The classes are recombined before downstream processing.
 - `samtools`: the combined mapped BAM is processed using the same name-sort/fixmate/coordinate-sort/markdup sequence used by PlainMap v0.1.0. Use this mode for new samples that must remain methodologically comparable with v0.1 analyses.
 
-Using DeDup `--merged` is well suited to merged reads whose aligned ends represent both molecular ends. For true SE reads shorter than the original molecule, the aligned 3' end may not be the molecular end; DeDup can therefore leave some duplicates unresolved. The selected method is recorded in the run configuration and summary statistics, and cannot be changed when resuming. The immutable earlier release tags remain available for exact software-version reproduction. Ancient analyses requiring the v0.1-v0.2.1 mapping default should specify `--gap-opens 1`; v0.2.2 defaults to `2`.
+Using DeDup `--merged` is well suited to merged reads whose aligned ends represent both molecular ends. For true SE reads shorter than the original molecule, the aligned 3' end may not be the molecular end; DeDup can therefore leave some duplicates unresolved. The selected method is recorded in the run configuration and summary statistics, and cannot be changed when resuming. The immutable earlier release tags remain available for exact software-version reproduction. Ancient analyses requiring the v0.1-v0.2.1 mapping default should specify `--gap-opens 1`; v0.2.2 and later default to `2`.
 
-## Limitations (v0.2.2)
+## Limitations (v0.3.0)
 
 - Single read group per sample
 - No QC plotting
@@ -412,7 +448,7 @@ Using DeDup `--merged` is well suited to merged reads whose aligned ends represe
 
 ## Development Status
 
-PlainMap is **v0.2.2** and under active development.
+PlainMap is **v0.3.0** and under active development.
 
 Issues, feedback, and pull requests are welcome.
 

@@ -7,6 +7,7 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/plainmap-tests.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 DEDUP_CMD="${DEDUP:-dedup}"
+ADAPTCLEAN_CMD="${ADAPTCLEAN:-AdaptClean}"
 
 for cmd in fastp bwa samtools "$DEDUP_CMD" python3 gzip sha256sum; do
   command -v "$cmd" >/dev/null 2>&1 || {
@@ -330,6 +331,175 @@ grep -F -- "--gap-opens must be a non-negative integer" \
 
 run_plainmap config modern "$config_out" --mapq 25 --keep-intermediate --reset
 grep -F $'mapq\t25' "$config_out/config.plainmap.run-config.tsv" >/dev/null
+
+echo "Testing resume after failure during fastp chunk processing"
+preprocess_out="$TMP_ROOT/preprocess-resume"
+preprocess_base="$TMP_ROOT/preprocess-baseline"
+fastp_wrapper="$TMP_ROOT/fail-second-fastp.sh"
+export REAL_FASTP="$(command -v fastp)"
+export FASTP_CALLS="$TMP_ROOT/fastp-call-count"
+cat > "$fastp_wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+calls=0
+[[ ! -f "$FASTP_CALLS" ]] || read -r calls < "$FASTP_CALLS"
+calls=$((calls + 1))
+printf '%s\n' "$calls" > "$FASTP_CALLS"
+if [[ "$calls" -eq 2 ]]; then
+  echo "Intentional fastp failure for resume regression" >&2
+  exit 99
+fi
+exec "$REAL_FASTP" "$@"
+EOF
+chmod +x "$fastp_wrapper"
+
+if bash "$PLAINMAP" \
+    --manifest "$TMP_ROOT/manifest.txt" \
+    --prefix preprocess_resume \
+    --ref "$TMP_ROOT/reference.fa" \
+    --outdir "$preprocess_out" \
+    --threads 1 \
+    --library-type modern \
+    --max-reads-per-chunk 1 \
+    --trim-only \
+    --keep-intermediate \
+    --fastp "$fastp_wrapper" > "$TMP_ROOT/preprocess-interrupted.log" 2>&1; then
+  echo "ERROR: intentional fastp failure unexpectedly succeeded" >&2
+  exit 1
+fi
+[[ "$(cat "$FASTP_CALLS")" -eq 2 ]]
+grep -F "Intentional fastp failure" "$TMP_ROOT/preprocess-interrupted.log" >/dev/null
+
+run_plainmap preprocess_resume modern "$preprocess_out" \
+  --max-reads-per-chunk 1 --trim-only --keep-intermediate --fastp "$fastp_wrapper"
+run_plainmap preprocess_resume modern "$preprocess_base" \
+  --max-reads-per-chunk 1 --trim-only --keep-intermediate
+cmp -s "$preprocess_out/preprocess_resume.plainmap.stats.tsv" \
+       "$preprocess_base/preprocess_resume.plainmap.stats.tsv"
+for pooled in pool.PE.R1 pool.PE.R2 pool.SE.all; do
+  resumed="$preprocess_out/preprocess_resume/work/raw/preprocess_resume.${pooled}.fastq.gz"
+  baseline="$preprocess_base/preprocess_resume/work/raw/preprocess_resume.${pooled}.fastq.gz"
+  [[ "$(gzip -dc "$resumed" | sha256sum)" == "$(gzip -dc "$baseline" | sha256sum)" ]]
+done
+
+if command -v "$ADAPTCLEAN_CMD" >/dev/null 2>&1; then
+  echo "Testing optional AdaptClean on true single-end reads"
+  adapter=AGATCGGAAGAGCACACGTCTGAACTCCAGTCA
+  base=ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT
+  quality76=$(printf '%*s' 76 '' | tr ' ' I)
+  {
+    for k in 0 1 2 3 4 5 6; do
+      sequence="${base:0:$((76-k))}${adapter:0:k}"
+      printf '@adapter.%s\n%s\n+\n%s\n' "$k" "$sequence" "$quality76"
+    done
+  } | gzip -c > "$TMP_ROOT/adapter_se.fastq.gz"
+  printf '%s\n' "$TMP_ROOT/adapter_se.fastq.gz" > "$TMP_ROOT/adapter_se_manifest.txt"
+
+  se_base="$TMP_ROOT/adapter-se-baseline"
+  se_clean="$TMP_ROOT/adapter-se-cleaned"
+  for case in baseline cleaned; do
+    outdir="$se_base"
+    extras=()
+    if [[ "$case" == cleaned ]]; then
+      outdir="$se_clean"
+      extras=( --run-adaptclean --adaptclean "$ADAPTCLEAN_CMD" )
+    fi
+    bash "$PLAINMAP" --manifest "$TMP_ROOT/adapter_se_manifest.txt" \
+      --prefix adapter_se --ref "$TMP_ROOT/reference.fa" --outdir "$outdir" \
+      --library-type modern --threads 1 --trim-only --keep-intermediate \
+      --dedup-method samtools --adapter-r1 "$adapter" "${extras[@]}" \
+      > "$TMP_ROOT/adapter-se-${case}.log" 2>&1 || {
+        cat "$TMP_ROOT/adapter-se-${case}.log" >&2
+        exit 1
+      }
+  done
+
+  baseline_lengths=$(gzip -dc "$se_base/adapter_se/work/raw/adapter_se.pool.SE.all.fastq.gz" \
+    | awk 'NR%4==2{print length($0)}' | paste -sd, -)
+  cleaned_lengths=$(gzip -dc "$se_clean/adapter_se/work/raw/adapter_se.pool.SE.all.fastq.gz" \
+    | awk 'NR%4==2{print length($0)}' | paste -sd, -)
+  [[ "$baseline_lengths" == '76,76,76,76,76,71,70' ]]
+  [[ "$cleaned_lengths" == '76,75,74,73,72,71,70' ]]
+  [[ ! -e "$se_base/adapter_se.adaptclean.tsv" ]]
+  awk -F '\t' 'NR==2 {if ($3!=76 || $4!="AGATC" || $5!=7 || $6!=4 || $7!=0 || $8!=7) exit 1; found=1} END {if (!found) exit 1}' \
+    "$se_clean/adapter_se.adaptclean.tsv"
+  grep -F $'run_adaptclean\t1' "$se_clean/adapter_se.plainmap.run-config.tsv" >/dev/null
+
+  if bash "$PLAINMAP" --manifest "$TMP_ROOT/adapter_se_manifest.txt" \
+      --prefix adapter_se --ref "$TMP_ROOT/reference.fa" --outdir "$se_base" \
+      --library-type modern --threads 1 --trim-only --keep-intermediate \
+      --dedup-method samtools --adapter-r1 "$adapter" \
+      --run-adaptclean --adaptclean "$ADAPTCLEAN_CMD" \
+      > "$TMP_ROOT/adapter-se-config-mismatch.log" 2>&1; then
+    echo "ERROR: enabling AdaptClean unexpectedly resumed an unchanged run" >&2
+    exit 1
+  fi
+  grep -F "run_adaptclean: previous='0'; current='1'" "$TMP_ROOT/adapter-se-config-mismatch.log" >/dev/null
+
+  quality33=$(printf '%*s' 33 '' | tr ' ' I)
+  {
+    printf '@clean\n%s\n+\n%s\n' "${base:0:32}T" "$quality33"
+    printf '@short\n%s\n+\n%s\n' "${base:0:29}AGAT" "$quality33"
+  } | gzip -c > "$TMP_ROOT/adapter_se_short.fastq.gz"
+  printf '%s\n' "$TMP_ROOT/adapter_se_short.fastq.gz" > "$TMP_ROOT/adapter_se_short_manifest.txt"
+  short_out="$TMP_ROOT/adapter-se-short"
+  bash "$PLAINMAP" --manifest "$TMP_ROOT/adapter_se_short_manifest.txt" \
+    --prefix adapter_short --ref "$TMP_ROOT/reference.fa" --outdir "$short_out" \
+    --library-type modern --threads 1 --trim-only --keep-intermediate \
+    --dedup-method samtools --adapter-r1 "$adapter" --minlength 30 \
+    --run-adaptclean --adaptclean "$ADAPTCLEAN_CMD" \
+    > "$TMP_ROOT/adapter-se-short.log" 2>&1 || {
+      cat "$TMP_ROOT/adapter-se-short.log" >&2
+      exit 1
+    }
+  [[ "$(stats_value "$short_out/adapter_short.plainmap.stats.tsv" trimmed_fragments)" -eq 1 ]]
+  awk -F '\t' 'NR==2 {if ($5!=2 || $6!=1 || $7!=1 || $8!=1) exit 1; found=1} END {if (!found) exit 1}' \
+    "$short_out/adapter_short.adaptclean.tsv"
+
+  {
+    printf '@short.1\n%s\n+\n%s\n' "${base:0:69}AGAT" "${quality76:0:73}"
+    printf '@short.2\n%s\n+\n%s\n' "${base:0:69}AGAT" "${quality76:0:73}"
+    printf '@full.1\n%s\n+\n%s\n' "${base:0:72}AGAT" "$quality76"
+    printf '@full.2\n%s\n+\n%s\n' "${base:0:72}AGAT" "$quality76"
+  } | gzip -c > "$TMP_ROOT/adapter_se_variable.fastq.gz"
+  printf '%s\n' "$TMP_ROOT/adapter_se_variable.fastq.gz" > "$TMP_ROOT/adapter_se_variable_manifest.txt"
+  variable_out="$TMP_ROOT/adapter-se-variable"
+  bash "$PLAINMAP" --manifest "$TMP_ROOT/adapter_se_variable_manifest.txt" \
+    --prefix adapter_variable --ref "$TMP_ROOT/reference.fa" --outdir "$variable_out" \
+    --library-type modern --threads 1 --trim-only --keep-intermediate \
+    --max-reads-per-chunk 2 --dedup-method samtools --adapter-r1 "$adapter" \
+    --run-adaptclean --adaptclean "$ADAPTCLEAN_CMD" \
+    > "$TMP_ROOT/adapter-se-variable.log" 2>&1 || {
+      cat "$TMP_ROOT/adapter-se-variable.log" >&2
+      exit 1
+    }
+  variable_lengths=$(gzip -dc "$variable_out/adapter_variable/work/raw/adapter_variable.pool.SE.all.fastq.gz" \
+    | awk 'NR%4==2{print length($0)}' | paste -sd, -)
+  [[ "$variable_lengths" == '73,73,72,72' ]]
+  awk -F '\t' 'NR==2 {if ($3!=76 || $4!="NA" || $5!=2 || $6!=0) exit 1; first=1} NR==3 {if ($3!=76 || $4!="AGATC" || $5!=2 || $6!=2) exit 1; second=1} END {if (!first || !second) exit 1}' \
+    "$variable_out/adapter_variable.adaptclean.tsv"
+
+  {
+    printf '@first\n%s\n+\n%s\n' "${base:0:32}T" "$quality33"
+    printf '@second\n%s\n+\n%s\n' "${base:0:33}T" "${quality33}I"
+  } | gzip -c > "$TMP_ROOT/adapter_se_uncertain.fastq.gz"
+  printf '%s\n' "$TMP_ROOT/adapter_se_uncertain.fastq.gz" > "$TMP_ROOT/adapter_se_uncertain_manifest.txt"
+  uncertain_out="$TMP_ROOT/adapter-se-uncertain"
+  bash "$PLAINMAP" --manifest "$TMP_ROOT/adapter_se_uncertain_manifest.txt" \
+    --prefix adapter_uncertain --ref "$TMP_ROOT/reference.fa" \
+    --outdir "$uncertain_out" --library-type modern --threads 1 \
+    --trim-only --dedup-method samtools --adapter-r1 "$adapter" \
+    --run-adaptclean --adaptclean "$ADAPTCLEAN_CMD" \
+    > "$TMP_ROOT/adapter-se-uncertain.log" 2>&1 || {
+      cat "$TMP_ROOT/adapter-se-uncertain.log" >&2
+      exit 1
+    }
+  grep -F 'AdaptClean skipped for' "$TMP_ROOT/adapter-se-uncertain.log" >/dev/null
+  awk -F '\t' 'NR==2 {if ($3!="NA" || $4!="NA" || $5!=2 || $6!=0 || $7!=0 || $8!=2) exit 1; found=1} END {if (!found) exit 1}' \
+    "$uncertain_out/adapter_uncertain.adaptclean.tsv"
+else
+  echo "Skipping optional AdaptClean tests (AdaptClean not found in PATH)"
+fi
 
 echo "Testing forced chunking equivalence"
 base_out="$TMP_ROOT/equivalence/base"
