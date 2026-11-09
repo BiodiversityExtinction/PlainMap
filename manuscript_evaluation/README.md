@@ -1,14 +1,24 @@
 # Manuscript evaluation
 
-This directory records the manifest, commands, parameters, and expected results used for
-the PlainMap manuscript evaluation. Sequence data and the 2.44 GB reference FASTA are not
-committed to the repository.
+This directory records the manifests, commands, parameters, and results for the
+original evaluation and the later scale, chunking, and AdaptClean tests. The
+original [`evaluation_results.tsv`](evaluation_results.tsv) and
+[`restart_checks.tsv`](restart_checks.tsv) are committed. Later run outputs
+under `evaluation_runs/` are ignored by Git; the large sequence files,
+reference genomes, BAMs, and newer result tables are not available in this
+repository. The scripts and instructions below document how to regenerate
+those results with the required input data.
 
-The original manuscript table used PlainMap v0.1.0 and its samtools-only duplicate-removal policy. Check
-out the immutable `v0.1.0` tag for exact software-version reproduction. PlainMap v0.2.0
-uses class-specific DeDup and samtools duplicate handling and will not reproduce the same
-duplicate statistics. In v0.2.2 and later, retain the v0.1 mapping and duplicate-removal
-methodology by specifying `--gap-opens 1 --dedup-method samtools`.
+The original manuscript table used PlainMap v0.1.0 and its samtools-only
+duplicate-removal policy. Check out the immutable `v0.1.0` tag for the exact
+PlainMap script version. The later hybrid-policy Z3 and cave hyena
+tests used a frozen script snapshot from November 5, 2026 (SHA-256
+`2723d9eed4ac2d39fe33af11c0cd2f3046362b2963f5632b1d2662daf91fedb6`).
+Its executable logic matches v0.3.0; only the version label and comments
+differ. It uses hybrid DeDup/samtools duplicate removal by default, so its
+duplicate statistics cannot be directly compared with v0.1.0. To retain the
+v0.1 mapping and duplicate-removal methodology with v0.3.0, specify
+`--gap-opens 1 --dedup-method samtools`.
 
 ## Dataset
 
@@ -224,7 +234,7 @@ not be interpreted as a direct extension of the original 3M-fragment table.
 `run_cavehyena_50m_adaptclean.sh` compares 50,000,000 pilot fragments from the
 single-end ancient cave hyena sample `Ccsp043` against the indexed striped hyena
 assembly `GCF_003009895.1`. The two conditions use the same raw FASTQ, PlainMap
-snapshot, `ancient-fast` mapping mode, hybrid deduplication, and 16 threads. Task
+snapshot, `ancient-fast` mapping mode, hybrid deduplication, and 16 threads.
 The `off` run uses fastp alone; the `on` run additionally applies AdaptClean to
 fastp's true SE output.
 Pre-trimming chunking is disabled in both conditions. The first 10,000 raw reads

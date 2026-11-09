@@ -455,9 +455,30 @@ Selected fields are calculated as follows:
 
 ## Evaluation
 
-The manifest, parameterized commands, restart/chunking protocol, provenance details, and
-reported result tables used for the v0.1.0 manuscript evaluation are archived in
-[`manuscript_evaluation/`](manuscript_evaluation/).
+The [evaluation archive](manuscript_evaluation/README.md) contains the input
+manifest, runnable protocols, tool-version and parameter information, and
+reproduction notes. It separates the original v0.1.0 evaluation from later
+tests of larger workloads and optional features:
+
+| Evaluation | Data and question | Code and public materials |
+|---|---|---|
+| Original mapping modes and restart | Three million pilot fragments from a heterogeneous Japanese sea lion (Z3) manifest containing SE and PE FASTQs with SRA- and ENA-style headers; compare `modern`, `ancient-fast`, and `ancient-all`, then interrupt and resume a chunked `modern` run. | v0.1.0; [manifest](manuscript_evaluation/Z3_manifest_test.txt), [mapping-mode runner](manuscript_evaluation/run_mapping_mode.sh), [restart runner](manuscript_evaluation/run_restart_chunk_evaluation.sh), [reported results](manuscript_evaluation/evaluation_results.tsv), and [restart checks](manuscript_evaluation/restart_checks.tsv). |
+| Larger Z3 workload | 27,943,970 input fragments across the same three manifest units; compare unchunked processing with one-million-fragment chunks under `modern` mapping. | v0.1.0 and, separately, a v0.3.0-equivalent pre-release snapshot using hybrid duplicate removal; [input preparation](manuscript_evaluation/prepare_z3_10m_inputs.sh) and [benchmark runner](manuscript_evaluation/run_large_z3_benchmark.sh). Results from the two duplicate policies are not directly interchangeable. |
+| Chunking diagnostics | Compare five- and ten-million-fragment chunks with unchunked runs; repeat unchunked runs and inspect stage checksums to locate count differences. A controlled fastp audit compares automatic with fixed adapters. | Pre-release snapshot for the larger-run diagnostics; v0.1.0 for the [fastp audit](manuscript_evaluation/run_fastp_chunk_audit.sh). See the [chunk-size sweep](manuscript_evaluation/run_z3_chunk_size_sweep.sh), [mapping diagnostic](manuscript_evaluation/run_z3_mapping_diagnostic.sh), and [repeat runner](manuscript_evaluation/run_z3_unchunked_repeat.sh). |
+| Short-read ancient sample | Fifty million pilot fragments from a single-end cave hyena library mapped in `ancient-fast` mode to striped hyena, with AdaptClean off versus on after fastp. | v0.3.0-equivalent pre-release snapshot; [runner](manuscript_evaluation/run_cavehyena_50m_adaptclean.sh) and [summary script](manuscript_evaluation/summarize_cavehyena_50m.sh). |
+
+The original result tables are committed to Git. The large FASTQs, reference
+genomes, BAMs, and output tables from the later runs are **not** in the
+repository; the archive documents how to regenerate them and records the
+evaluated script snapshot. The November 5 snapshot differs from the v0.3.0
+release only in its version label and comments. Optional AdaptClean is not
+part of the Conda environment above.
+
+These tests check input handling, execution, chunking, and restart behavior.
+Mapped-fragment counts do not establish alignment accuracy or biological
+endogeneity. Chunking can change fastp's automatic adapter inference, so
+small differences in downstream counts are possible; the controlled fixed-
+adapter audit is described in the [evaluation notes](manuscript_evaluation/README.md).
 
 ---
 
