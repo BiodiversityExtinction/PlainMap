@@ -62,6 +62,24 @@ PlainMap is a single Bash script. No compilation required.
 
 ---
 
+## Install with Conda
+
+From the PlainMap directory:
+
+```bash
+conda env create -f environment.yml
+conda activate plainmap
+bash plainmap.sh --help
+```
+
+This environment includes the default mapping tools and pins the fastp, BWA,
+samtools, and DeDup versions used in the evaluation. PlainMap itself remains a
+Bash script; no separate installation is needed. Optional mapDamage and
+AdaptClean are not included and must be installed separately if enabled.
+The environment was tested on Linux x86-64. It uses Python 3.10 rather than
+the Python 3.13.5 used in the original evaluation because the samtools 1.13
+Conda package cannot be solved with Python 3.13.
+
 ## Dependencies
 
 All tools must be available on PATH unless overridden via flags.
@@ -399,9 +417,8 @@ Optional outputs:
 
 ## Summary Statistics
 
-All statistics are **fragment-aware**.
-
-Paired-end reads are counted as one fragment where appropriate.
+Fragment counts treat an intact paired-end pair as one fragment. Read-length,
+mapped-base, and coverage statistics are read- or base-level measures.
 Pilot mode affects all counts.
 
 Reported fields include:
@@ -417,6 +434,22 @@ Reported fields include:
 - mapped base pairs
 - genome-wide average depth
 - genome-wide percent covered
+
+Selected fields are calculated as follows:
+
+- `trimmed_fragments`: fragments retained after fastp and optional AdaptClean.
+  An unmerged pair, a merged read, or a single read each counts as one; each
+  surviving unpaired mate also counts as one.
+- `endog`: unique mapped fragments after MAPQ filtering and duplicate removal,
+  divided by raw input fragments. Multiply by 100 for a percentage; this is
+  not an independent estimate of biological origin.
+- `duprate` (also `pe_duprate` and `se_like_duprate`): duplicate fragments
+  divided by mapped fragments before duplicate removal, for the relevant class.
+- `avg_readlen`: mean length of the `SEQ` field for retained primary mapped
+  reads in the final BAM.
+- `mapped_bp`: sum of those `SEQ` lengths, not CIGAR-aligned reference bases.
+- `avg_depth` and `pct_covered`: reference-length-weighted mean depth and
+  covered-base percentage from `samtools coverage` at the configured MAPQ threshold.
 
 ---
 

@@ -1,0 +1,20 @@
+name: plainmap
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - bash>=5
+  - coreutils
+  - findutils
+  - gawk
+  - grep
+  - sed
+  - gzip
+  - pigz
+  - python=3.10
+  - fastp=1.0.1
+  - bwa=0.7.17
+  - samtools=1.13
+  - dedup=0.12.9
+  - openjdk=17
