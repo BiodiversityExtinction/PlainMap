@@ -20,6 +20,21 @@ duplicate statistics cannot be directly compared with v0.1.0. To retain the
 v0.1 mapping and duplicate-removal methodology with v0.3.0, specify
 `--gap-opens 1 --dedup-method samtools`.
 
+## Evaluation overview
+
+| Evaluation | Data and question | Code and public materials |
+|---|---|---|
+| Original mapping modes and restart | Three million pilot fragments from a heterogeneous Japanese sea lion (Z3) manifest containing SE and PE FASTQs with SRA- and ENA-style headers; compare `modern`, `ancient-fast`, and `ancient-all`, then interrupt and resume a chunked `modern` run. | v0.1.0; [manifest](Z3_manifest_test.txt), [mapping-mode runner](run_mapping_mode.sh), [restart runner](run_restart_chunk_evaluation.sh), [reported results](evaluation_results.tsv), and [restart checks](restart_checks.tsv). |
+| Larger Z3 workload | 27,943,970 input fragments across the same three manifest units; compare unchunked processing with one-million-fragment chunks under `modern` mapping. | v0.1.0 and, separately, the v0.3.0-equivalent snapshot using hybrid duplicate removal; [input preparation](prepare_z3_10m_inputs.sh) and [benchmark runner](run_large_z3_benchmark.sh). Results from the two duplicate policies are not directly interchangeable. |
+| Chunking diagnostics | Compare five- and ten-million-fragment chunks with unchunked runs; repeat unchunked runs and inspect stage checksums to locate count differences. A controlled fastp audit compares automatic with fixed adapters. | Snapshot for the larger-run diagnostics; v0.1.0 for the [fastp audit](run_fastp_chunk_audit.sh). See the [chunk-size sweep](run_z3_chunk_size_sweep.sh), [mapping diagnostic](run_z3_mapping_diagnostic.sh), and [repeat runner](run_z3_unchunked_repeat.sh). |
+| Short-read ancient sample | Fifty million pilot fragments from a single-end cave hyena library mapped in `ancient-fast` mode to striped hyena, with AdaptClean off versus on after fastp. | Snapshot; [runner](run_cavehyena_50m_adaptclean.sh) and [summary script](summarize_cavehyena_50m.sh). AdaptClean is not included in the Conda environment. |
+
+These tests check input handling, execution, chunking, and restart behavior.
+Mapped-fragment counts do not establish alignment accuracy or biological
+endogeneity. Chunking can change fastp's automatic adapter inference, so
+small differences in downstream counts are possible; the controlled
+fixed-adapter audit is described under Results below.
+
 ## Dataset
 
 The heterogeneous Z3 manifest contains:
