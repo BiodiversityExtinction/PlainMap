@@ -33,13 +33,11 @@ Current version: **v0.3.0**
   - Mate assignment is deterministic by manifest order
   - Header keys and read counts must match
   - Ambiguous groupings are rejected
-- fastp runs per unit (or unit-chunk), then pools outputs
-- Pooled outputs are separated into:
-  - **Unmerged PE** (R1 + R2)
-  - **SE-like reads** (merged + unpaired + true SE)
+- fastp runs per unit (or per input chunk), keeping **unmerged PE** mates separate from **SE-like reads** (merged, unpaired, and true SE)
+- Without chunking, trimmed outputs are pooled by read class before mapping
+- With chunking, fastp outputs are mapped directly, without pooling and re-splitting; adapters are inferred once per input unit when possible
 - Optional pre-fastp chunking safety valve
 - Optional **per-unit pilot limiting before fastp**
-- Optional post-pooling mapping chunking (restartable)
 - **Restartable mapping (per-chunk resume):** already-produced valid chunk BAMs are not remapped
 - **Disk-space friendly mode:** optionally deletes chunk/mapchunk FASTQs as soon as they are safe to remove
 - Automatic use of pigz if available
@@ -166,29 +164,32 @@ In this case:
 
 ## Pipeline Overview
 
+Without `--max-reads-per-chunk`, PlainMap pools the trimmed PE and SE-like
+outputs separately before mapping. With chunking enabled, it maps each fastp
+output chunk directly; there is no post-fastp pooling and re-splitting step.
+
 1. Preflight checks (tools, gzip support, split features)
 2. Manifest parsing and path resolution
 3. Header-based SE/PE classification and unit construction
-4. Optional pre-fastp chunking (safety valve)
+4. Optional pre-fastp chunking; for chunked runs without explicit adapters, probe each input unit once and reuse its inferred adapters across chunks when possible
 5. Optional per-unit pilot limiting (before fastp)
-6. fastp trimming (JSON output only)
-7. Pooling of trimmed outputs:
-   - Unmerged PE kept separate
-   - SE-like reads pooled together
-8. Optional post-fastp mapping chunking
-9. Mapping:
+6. fastp trimming and paired-end merging; optional AdaptClean on original SE reads
+7. Prepare mapping inputs:
+   - Unchunked: pool trimmed unmerged PE mates separately from SE-like reads
+   - Chunked: retain each fastp output as a mapping chunk, combining only SE-like outputs from the same chunk
+8. Mapping (optional unmapped-read FASTQ export):
    - modern: bwa mem
    - ancient-fast: bwa aln + samse (SE-like only)
    - ancient-all: bwa aln + sampe / samse
-10. Merge of mapping outputs (overwrite-safe)
-11. Duplicate removal:
+9. Merge of mapping outputs (overwrite-safe)
+10. Duplicate removal:
    - `hybrid` (default): DeDup `--merged` for SE-like reads and samtools `fixmate + markdup` for unmerged PE reads
    - `samtools`: v0.1-compatible samtools `markdup` processing of the combined BAM
-12. Final sorting, indexing, and read group assignment
-13. Optional mapDamage
-14. Coverage and depth statistics
-15. Fragment-aware summary statistics
-16. Cleanup (optional retention of intermediates)
+11. Final sorting, indexing, and read group assignment
+12. Optional mapDamage
+13. Coverage and depth statistics
+14. Fragment-aware summary statistics
+15. Cleanup (optional retention of intermediates)
 
 ---
 
@@ -228,7 +229,7 @@ tracking.
 ### Optional Residual Adapter Cleanup
 
 `--run-adaptclean` applies the external AdaptClean executable to **true single-end FASTQ
-units only**, after fastp and before reads are pooled. It does not process merged reads,
+units only**, after fastp and before pooling or direct mapping. It does not process merged reads,
 unpaired reads derived from paired-end units, or paired-end mates. PlainMap scans each
 original SE FASTQ once for cycle inference (an extra input scan) and uses its
 longest raw read length as the candidate cycle length for every chunk from that
@@ -273,12 +274,12 @@ Optional parameters:
 | `--mapq INT` | `20` | MAPQ threshold applied during BAM generation. |
 | `--dedup-method hybrid\|samtools` | `hybrid` | Duplicate-removal policy. `samtools` applies the combined-BAM v0.1 policy for comparable ongoing analyses. |
 | `--emit-unmapped-fastq` | off | Export unmapped reads to `SAMPLE.unmapped.*.fastq.gz` without changing final BAM/stats filtering. |
-| `--max-reads-per-chunk INT` | `0` | Pre/post-fastp chunking size cap (`0` disables chunk splitting). |
+| `--max-reads-per-chunk INT` | `0` | Pre-fastp chunk size cap; map fastp outputs directly (`0` disables chunk splitting). Chunked runs probe adapters once per input unit, record calls in `SAMPLE.plainmap.adapters.tsv`, and fall back to per-chunk inference if the probe is inconclusive. |
 | `--pilot-fragments INT` | `0` | Per-unit read/fragment cap before fastp (`0` disables pilot mode). |
 | `--adapter-r1 SEQ` | auto | Explicit adapter for read 1. |
 | `--adapter-r2 SEQ` | auto | Explicit adapter for read 2. |
 | `--run-adaptclean` | off | After fastp, run AdaptClean on true single-end reads only. Infers one cycle length per original SE file from a supported maximum raw length, then uses the first five bases of fastp's detected adapter. Skips files with an uncertain cycle length; an undetected adapter is an error. Reads shortened below `--minlength` are removed. |
-| `--trim-only` | off | Run trimming/pooling and exit before mapping. |
+| `--trim-only` | off | Run trimming and prepare mapping inputs, then exit before mapping. |
 | `--run-mapdamage` | off | Run mapDamage on final BAM. With `--threads` > 1 and more than one contig has mapped reads, the BAM is split by whole contig and scanned by mapDamage in parallel, then results are merged before final plotting; mapDamage itself is never modified, and the count tables are numerically equivalent to a single-process run. |
 | `--mapdamage-serial` | off | Force the original single-process mapDamage behavior even when `--threads` > 1. |
 | `--tmpdir DIR` | auto | Custom temp/scratch directory. |
@@ -457,7 +458,7 @@ Selected fields are calculated as follows:
 
 PlainMap provides two duplicate-removal policies:
 
-- `hybrid` (default): merged, unpaired, and true single-end reads are pooled as SE-like reads and processed by DeDup with `--merged`; unmerged paired-end reads are processed separately with samtools `fixmate` and `markdup`. The classes are recombined before downstream processing.
+- `hybrid` (default): merged, unpaired, and true single-end alignments are treated together as SE-like reads and processed by DeDup with `--merged`; unmerged paired-end alignments are processed separately with samtools `fixmate` and `markdup`. The classes are recombined before downstream processing.
 - `samtools`: the combined mapped BAM is processed using the same name-sort/fixmate/coordinate-sort/markdup sequence used by PlainMap v0.1.0. Use this mode for new samples that must remain methodologically comparable with v0.1 analyses.
 
 Using DeDup `--merged` is well suited to merged reads whose aligned ends represent both molecular ends. For true SE reads shorter than the original molecule, the aligned 3' end may not be the molecular end; DeDup can therefore leave some duplicates unresolved. The selected method is recorded in the run configuration and summary statistics, and cannot be changed when resuming. The immutable earlier release tags remain available for exact software-version reproduction. Ancient analyses requiring the v0.1-v0.2.1 mapping default should specify `--gap-opens 1`; v0.2.2 and later default to `2`.

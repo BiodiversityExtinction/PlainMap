@@ -105,12 +105,12 @@ Optional:
   --mapq INT                                 Mapping quality threshold (default: 20)
   --dedup-method hybrid|samtools             (default: hybrid; samtools matches v0.1 behavior)
   --emit-unmapped-fastq                      Export unmapped reads to FASTQ
-  --max-reads-per-chunk INT                  (default: 0; disabled) pre-fastp chunking safety valve
+  --max-reads-per-chunk INT                  (default: 0; disabled) split input units for fastp, then map their outputs directly
   --pilot-fragments INT                      (default: 0; disabled) PER-UNIT cap on fragments before fastp
   --adapter-r1 SEQ
   --adapter-r2 SEQ
   --run-adaptclean                           Clean residual adapter from true SE reads after fastp (default OFF)
-  --trim-only                                Trim only (fastp and optional AdaptClean); exit before mapping
+  --trim-only                                Run fastp and optional AdaptClean; exit before mapping
   --run-mapdamage                            Run mapDamage (any library type; default OFF)
   --mapdamage-serial                         Disable automatic contig-split mapDamage parallelization
   --tmpdir DIR                               Custom temp dir (e.g. node-local scratch)
@@ -280,6 +280,7 @@ DEDUP_REPORTS="$OUT/${SAMPLE}/dedup_reports"
 
 STATS="$OUT/${SAMPLE}.plainmap.stats.tsv"
 ADAPTCLEAN_REPORT="$OUT/${SAMPLE}.adaptclean.tsv"
+ADAPTER_REPORT="$OUT/${SAMPLE}.plainmap.adapters.tsv"
 COV_TSV="$OUT/${SAMPLE}.plainmap.coverage.tsv"
 OUT_BAM="$OUT/${SAMPLE}.final.RG.bam"
 RUN_CONFIG="$OUT/${SAMPLE}.plainmap.run-config.tsv"
@@ -383,7 +384,7 @@ if [[ $RESET -eq 1 ]]; then
   log "Reset requested: restarting from scratch for sample $SAMPLE"
   rm -rf "$WORK" "$REPORTS" "$DEDUP_REPORTS" "$OUT/${SAMPLE}_mapdamage" 2>/dev/null || true
   rm -f "$OUT/${SAMPLE}.final.RG.bam" "$OUT/${SAMPLE}.final.RG.bam.bai" \
-        "$STATS" "$COV_TSV" "$RUN_CONFIG" "$ADAPTCLEAN_REPORT" \
+        "$STATS" "$COV_TSV" "$RUN_CONFIG" "$ADAPTCLEAN_REPORT" "$ADAPTER_REPORT" \
         "$UNMAPPED_R1_FQ" "$UNMAPPED_R2_FQ" "$UNMAPPED_SE_FQ" 2>/dev/null || true
   rm -f "$CKPT/${SAMPLE}."*.done "$RAW_META" "$PE_IDLIST" "$SE_IDLIST" 2>/dev/null || true
   mkdir -p "$RAW" "$CHUNKS" "$MAPCHUNKS" "$BAMS" "$MDCHUNKS" "$UNMAPPED" "$FINAL" "$CKPT" "$TMP" "$REPORTS" "$DEDUP_REPORTS"
@@ -457,7 +458,7 @@ if [[ $DRYRUN -eq 1 ]]; then
   log "  run_mapdamage:       $RUN_MAPDAMAGE (any library type)"
   log "  dedup_method:        $DEDUP_METHOD"
   log "  delete_as_you_go:    $DELETE_AS_YOU_GO"
-  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> (AdaptClean for true SE optional) -> pool -> mapchunk -> map (per-chunk resume) -> merge (-f overwrite) -> dedup ($DEDUP_METHOD) -> RG -> (mapDamage optional) -> coverage -> stats"
+  log "Plan: manifest -> build SE/PE units -> pre-fastp chunk (optional) -> pilot per-unit (optional) -> fastp -> (AdaptClean for true SE optional) -> map (per-chunk resume) -> merge (-f overwrite) -> dedup ($DEDUP_METHOD) -> RG -> (mapDamage optional) -> coverage -> stats"
   exit 0
 fi
 
@@ -489,19 +490,44 @@ PY
 
 write_run_config() {
   local destination="$1"
-  local script_path manifest_hash script_hash ref_identity
+  local script_path manifest_hash script_hash ref_identity input_identity_hash external_adapter_hash
   script_path="$(resolve_path "$0")"
   manifest_hash="$(file_sha256 "$MANIFEST")"
   script_hash="$(file_sha256 "$script_path")"
   ref_identity="$(file_identity "$REF")"
+  input_identity_hash=$("$PYTHON" - "$MANIFEST" <<'PY'
+import hashlib
+import os
+import sys
+
+manifest = os.path.realpath(sys.argv[1])
+base = os.path.dirname(manifest)
+digest = hashlib.sha256()
+with open(manifest, encoding="utf-8") as stream:
+    for line in stream:
+        name = line.strip()
+        if not name or name.startswith("#"):
+            continue
+        path = os.path.realpath(os.path.join(base, name))
+        stat = os.stat(path)
+        digest.update(f"{path}\t{stat.st_size}\t{stat.st_mtime_ns}\n".encode())
+print(digest.hexdigest())
+PY
+  )
+  external_adapter_hash="<none>"
+  if [[ -n "${ADAPTER_TABLE:-}" ]]; then
+    [[ -r "$ADAPTER_TABLE" ]] || die "Adapter table is not readable: $ADAPTER_TABLE"
+    external_adapter_hash="$(file_sha256 "$ADAPTER_TABLE")"
+  fi
 
   {
-    printf 'config_schema\t5\n'
+    printf 'config_schema\t6\n'
     printf 'plainmap_version\t%s\n' "$VERSION"
     printf 'plainmap_script\t%s\n' "$script_path"
     printf 'plainmap_script_sha256\t%s\n' "$script_hash"
     printf 'manifest\t%s\n' "$MANIFEST"
     printf 'manifest_sha256\t%s\n' "$manifest_hash"
+    printf 'input_file_identities_sha256\t%s\n' "$input_identity_hash"
     printf 'prefix\t%s\n' "$SAMPLE"
     printf 'reference\t%s\n' "$REF"
     printf 'reference_size_mtime_ns\t%s\n' "$ref_identity"
@@ -515,9 +541,11 @@ write_run_config() {
     printf 'dedup_method\t%s\n' "$DEDUP_METHOD"
     printf 'emit_unmapped_fastq\t%s\n' "$EMIT_UNMAPPED_FASTQ"
     printf 'max_reads_per_chunk\t%s\n' "$MAX_READS_PER_CHUNK"
+    printf 'chunking_strategy\t%s\n' "$(if [[ $MAX_READS_PER_CHUNK -gt 0 ]]; then printf 'direct-fastp-output'; else printf 'unchunked-pooled'; fi)"
     printf 'pilot_fragments\t%s\n' "$PILOT_FRAGMENTS"
     printf 'adapter_r1\t%s\n' "${ADAPTER_R1:-<auto>}"
     printf 'adapter_r2\t%s\n' "${ADAPTER_R2:-<auto>}"
+    printf 'external_adapter_table_sha256\t%s\n' "$external_adapter_hash"
     printf 'run_adaptclean\t%s\n' "$RUN_ADAPTCLEAN"
     printf 'trim_only\t%s\n' "$TRIM_ONLY"
     printf 'run_mapdamage\t%s\n' "$RUN_MAPDAMAGE"
@@ -713,6 +741,42 @@ run_fastp() {
 FASTP_ARGS=( -l "$MINLEN" -g -w "$THREADS" )
 [[ -n "$ADAPTER_R1" ]] && FASTP_ARGS+=( --adapter_sequence "$ADAPTER_R1" )
 [[ -n "$ADAPTER_R2" ]] && FASTP_ARGS+=( --adapter_sequence_r2 "$ADAPTER_R2" )
+
+probe_unit_adapter() {
+  local unit="$1" mode="$2" raw1="$3" raw2="${4:-}"
+  local probe_reads=10000 probe_threads="$THREADS"
+  (( PILOT_FRAGMENTS == 0 || PILOT_FRAGMENTS >= probe_reads )) || probe_reads="$PILOT_FRAGMENTS"
+  (( probe_threads <= 4 )) || probe_threads=4
+
+  local prefix="$TMP/${SAMPLE}.${unit}.adapter_probe"
+  local json="$REPORTS/${SAMPLE}.${unit}.adapter_probe.fastp.json"
+  local opts=( -l "$MINLEN" -g -w "$probe_threads" --reads_to_process "$probe_reads"
+    -i "$raw1" --out1 "${prefix}.R1.fastq.gz" -j "$json" --html "${prefix}.html" )
+  if [[ "$mode" == PE ]]; then
+    opts+=( -I "$raw2" --out2 "${prefix}.R2.fastq.gz" --detect_adapter_for_pe )
+  fi
+  run_fastp "${prefix}.stderr.log" "${opts[@]}"
+
+  local detected
+  detected=$("$PYTHON" - "$json" "$mode" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    adapters = json.load(stream).get("adapter_cutting", {})
+first = adapters.get("read1_adapter_sequence", "")
+second = adapters.get("read2_adapter_sequence", "") if sys.argv[2] == "PE" else "NA"
+valid = lambda value: isinstance(value, str) and re.fullmatch(r"[ACGT]{10,}", value)
+if not valid(first) or (sys.argv[2] == "PE" and not valid(second)):
+    print("NA\tNA")
+else:
+    print(f"{first}\t{second}")
+PY
+  ) || die "Could not parse adapter probe report for $unit"
+  IFS=$'\t' read -r PROBE_R1 PROBE_R2 <<< "$detected"
+  rm -f "${prefix}.R1.fastq.gz" "${prefix}.R2.fastq.gz" "${prefix}.html" "${prefix}.stderr.log"
+}
 
 infer_se_cycle_length() {
   local raw_se="$1"
@@ -1089,9 +1153,14 @@ PY
 POOL_PE_R1="$RAW/${SAMPLE}.pool.PE.R1.fastq.gz"
 POOL_PE_R2="$RAW/${SAMPLE}.pool.PE.R2.fastq.gz"
 POOL_SE_ALL="$RAW/${SAMPLE}.pool.SE.all.fastq.gz"
-need_fastp_files=( "$RAW_META" "$POOL_SE_ALL" )
-if [[ "$SEQ_MODE" != "SE" ]]; then
-  need_fastp_files+=( "$POOL_PE_R1" "$POOL_PE_R2" )
+need_fastp_files=( "$RAW_META" )
+if [[ "$MAX_READS_PER_CHUNK" -eq 0 ]]; then
+  need_fastp_files+=( "$POOL_SE_ALL" )
+  if [[ "$SEQ_MODE" != "SE" ]]; then
+    need_fastp_files+=( "$POOL_PE_R1" "$POOL_PE_R2" )
+  fi
+else
+  need_fastp_files+=( "$ADAPTER_REPORT" )
 fi
 [[ $RUN_ADAPTCLEAN -eq 0 ]] || need_fastp_files+=( "$ADAPTCLEAN_REPORT" )
 
@@ -1156,12 +1225,14 @@ fi
 # STEP 2: FASTP PER PRE-FASTP CHUNK -> POOL TRIMMED OUTPUTS
 ###############################################################################
 run_fastp_and_pool() {
-  log "STEP: fastp per unit-chunk (JSON only) + pooling (unmerged PE separate from SE-like)"
+  log "STEP: fastp per unit-chunk (JSON only) + preparing mapping inputs"
   ckpt_clear fastp_pool
 
-  : > "$POOL_PE_R1"
-  : > "$POOL_PE_R2"
-  : > "$POOL_SE_ALL"
+  if [[ "$MAX_READS_PER_CHUNK" -eq 0 ]]; then
+    : > "$POOL_PE_R1"
+    : > "$POOL_PE_R2"
+    : > "$POOL_SE_ALL"
+  fi
   if [[ $RUN_ADAPTCLEAN -eq 1 ]]; then
     printf 'unit\tchunk\tcycle_length\tadapter_prefix\tfastp_reads\tshortened_reads\tremoved_below_minlength\tpooled_reads\n' > "$ADAPTCLEAN_REPORT"
   fi
@@ -1176,6 +1247,8 @@ run_fastp_and_pool() {
 
   declare -A PILOT_LEFT_BY_UNIT
   declare -A SE_CYCLE_BY_UNIT
+  declare -A PE_UNIT_ADAPTER_R1 PE_UNIT_ADAPTER_R2 SE_UNIT_ADAPTER_R1
+  local PROBE_R1="" PROBE_R2=""
   if [[ $RUN_ADAPTCLEAN -eq 1 ]]; then
     local se_index=0 se_file se_unit cycle total support required inference
     for se_file in "${SE_FILES[@]}"; do
@@ -1194,6 +1267,65 @@ run_fastp_and_pool() {
       fi
       se_index=$((se_index + 1))
     done
+  fi
+  if [[ "$MAX_READS_PER_CHUNK" -gt 0 ]]; then
+    local report_tmp="$TMP/${SAMPLE}.adapters.current.tsv"
+    local pe_idx=0 se_idx=0 key unit source1 source2 adapter1 adapter2 status probe_count
+    printf 'unit\tsource_r1\tsource_r2\tprobe_reads\tadapter_r1\tadapter_r2\tstatus\n' > "$report_tmp"
+    for key in "${PE_KEYS[@]}"; do
+      unit="PE$(printf '%04d' "$pe_idx")"
+      source1="${R1_BY_KEY[$key]}"
+      source2="${R2_BY_KEY[$key]}"
+      adapter1="${ADAPTER_R1:-NA}"; adapter2="${ADAPTER_R2:-NA}"
+      status=explicit
+      probe_count=NA
+      if [[ -z "$ADAPTER_R1" && -z "$ADAPTER_R2" ]]; then
+        probe_count="$((PILOT_FRAGMENTS > 0 && PILOT_FRAGMENTS < 10000 ? PILOT_FRAGMENTS : 10000))"
+        probe_unit_adapter "$unit" PE "$source1" "$source2"
+        adapter1="$PROBE_R1"; adapter2="$PROBE_R2"
+        status=inferred
+        if [[ "$adapter1" == NA || "$adapter2" == NA ]]; then
+          status=per-chunk-auto
+          log "WARNING: no reliable PE adapter call for $unit; retaining fastp's per-chunk automatic detection"
+        else
+          PE_UNIT_ADAPTER_R1["$unit"]="$adapter1"
+          PE_UNIT_ADAPTER_R2["$unit"]="$adapter2"
+          log "  PE unit $unit adapters: R1=$adapter1 R2=$adapter2"
+        fi
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$unit" "$source1" "$source2" "$probe_count" \
+        "$adapter1" "$adapter2" "$status" >> "$report_tmp"
+      pe_idx=$((pe_idx + 1))
+    done
+    for source1 in "${SE_FILES[@]}"; do
+      unit="SE$(printf '%04d' "$se_idx")"
+      adapter1="${ADAPTER_R1:-NA}"
+      status=explicit
+      probe_count=NA
+      if [[ -z "$ADAPTER_R1" ]]; then
+        probe_count="$((PILOT_FRAGMENTS > 0 && PILOT_FRAGMENTS < 10000 ? PILOT_FRAGMENTS : 10000))"
+        probe_unit_adapter "$unit" SE "$source1"
+        adapter1="$PROBE_R1"
+        status=inferred
+        if [[ "$adapter1" == NA ]]; then
+          status=per-chunk-auto
+          log "WARNING: no reliable SE adapter call for $unit; retaining fastp's per-chunk automatic detection"
+        else
+          SE_UNIT_ADAPTER_R1["$unit"]="$adapter1"
+          log "  SE unit $unit adapter: R1=$adapter1"
+        fi
+      fi
+      printf '%s\t%s\tNA\t%s\t%s\tNA\t%s\n' \
+        "$unit" "$source1" "$probe_count" \
+        "$adapter1" "$status" >> "$report_tmp"
+      se_idx=$((se_idx + 1))
+    done
+    if [[ -f "$ADAPTER_REPORT" ]] && ! cmp -s "$ADAPTER_REPORT" "$report_tmp"; then
+      die "Inferred adapter calls changed for this run; refusing to reuse existing outputs. Compare $ADAPTER_REPORT with $report_tmp, or use --reset."
+    fi
+    mv "$report_tmp" "$ADAPTER_REPORT"
+    rm -f "$MAPCHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
   fi
   shopt -s nullglob
 
@@ -1263,31 +1395,38 @@ run_fastp_and_pool() {
     up1="$TMP/${SAMPLE}.${tag}.unpaired1.fastq.gz"
     up2="$TMP/${SAMPLE}.${tag}.unpaired2.fastq.gz"
 
+    local pe_unit="${unit_id#${SAMPLE}.}"
+    local chunk_fastp_args=( "${FASTP_ARGS[@]}" )
     local extra_pe=()
-    if [[ -z "$ADAPTER_R1" && -z "$ADAPTER_R2" ]]; then
+    if [[ -n "${PE_UNIT_ADAPTER_R1[$pe_unit]:-}" ]]; then
+      chunk_fastp_args+=( --adapter_sequence "${PE_UNIT_ADAPTER_R1[$pe_unit]}"
+        --adapter_sequence_r2 "${PE_UNIT_ADAPTER_R2[$pe_unit]}" )
+    elif [[ -z "$ADAPTER_R1" && -z "$ADAPTER_R2" ]]; then
       extra_pe+=( --detect_adapter_for_pe )
     fi
 
-    run_fastp "$fastp_err" "${FASTP_ARGS[@]}" "${extra_pe[@]}" \
+    run_fastp "$fastp_err" "${chunk_fastp_args[@]}" "${extra_pe[@]}" \
       -i "$in_r1" -I "$in_r2" \
       --out1 "$trim1" --out2 "$trim2" \
       -m --merged_out "$merged" \
       --unpaired1 "$up1" --unpaired2 "$up2" \
       -j "$fp_json" --html "$fp_html"
 
-    file_nonempty "$trim1" || die "fastp produced empty trimmed R1 for $tag"
-    file_nonempty "$trim2" || die "fastp produced empty trimmed R2 for $tag"
+    [[ -e "$trim1" && -e "$trim2" ]] || die "fastp did not produce both trimmed PE files for $tag"
 
-    cat "$trim1" >> "$POOL_PE_R1"
-    cat "$trim2" >> "$POOL_PE_R2"
-
-    file_nonempty "$merged" && cat "$merged" >> "$POOL_SE_ALL"
-    file_nonempty "$up1"   && cat "$up1"   >> "$POOL_SE_ALL"
-    file_nonempty "$up2"   && cat "$up2"   >> "$POOL_SE_ALL"
+    if [[ "$MAX_READS_PER_CHUNK" -eq 0 ]]; then
+      cat "$trim1" >> "$POOL_PE_R1"
+      cat "$trim2" >> "$POOL_PE_R2"
+      file_nonempty "$merged" && cat "$merged" >> "$POOL_SE_ALL"
+      file_nonempty "$up1"   && cat "$up1"   >> "$POOL_SE_ALL"
+      file_nonempty "$up2"   && cat "$up2"   >> "$POOL_SE_ALL"
+    fi
 
     local out1_reads merged_reads up1n up2n
     out1_reads=$(json_get_int_any "$fp_json" "read1_after_filtering.total_reads")
-    [[ "$out1_reads" -le 0 ]] && out1_reads=$(count_reads_fastq_gz "$trim1")
+    if [[ "$out1_reads" -le 0 && -s "$trim1" ]]; then
+      out1_reads=$(count_reads_fastq_gz "$trim1")
+    fi
     TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$out1_reads")
 
     merged_reads=$(json_get_int_any "$fp_json" "merged_and_filtered.total_reads")
@@ -1304,6 +1443,18 @@ run_fastp_and_pool() {
     UNPAIRED_READS=$(py_add "$UNPAIRED_READS" "$up2n")
     TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$up1n")
     TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$up2n")
+
+    if [[ "$MAX_READS_PER_CHUNK" -gt 0 ]]; then
+      local direct_id="${tag#${SAMPLE}.}"
+      direct_id="${direct_id/.R1_/_}"
+      if [[ "$out1_reads" -gt 0 ]]; then
+        mv "$trim1" "$MAPCHUNKS/${SAMPLE}.PE.R1_${direct_id}.fastq.gz"
+        mv "$trim2" "$MAPCHUNKS/${SAMPLE}.PE.R2_${direct_id}.fastq.gz"
+      fi
+      if [[ $((merged_reads + up1n + up2n)) -gt 0 ]]; then
+        cat "$merged" "$up1" "$up2" > "$MAPCHUNKS/${SAMPLE}.SE_${direct_id}.fastq.gz"
+      fi
+    fi
 
     rm -f "$trim1" "$trim2" "$merged" "$up1" "$up2" 2>/dev/null || true
     [[ -n "$lim_r1" ]] && rm -f "$lim_r1" "$lim_r2" 2>/dev/null || true
@@ -1365,14 +1516,28 @@ run_fastp_and_pool() {
     fp_html="$REPORTS/${SAMPLE}.${tag}.fastp.html"
     trim_se="$TMP/${SAMPLE}.${tag}.trim.SE.fastq.gz"
 
-    run_fastp "$fastp_err" "${FASTP_ARGS[@]}" \
+    local se_unit="${unit_id#${SAMPLE}.}"
+    local chunk_fastp_args=( "${FASTP_ARGS[@]}" )
+    if [[ -n "${SE_UNIT_ADAPTER_R1[$se_unit]:-}" ]]; then
+      chunk_fastp_args+=( --adapter_sequence "${SE_UNIT_ADAPTER_R1[$se_unit]}" )
+    fi
+    run_fastp "$fastp_err" "${chunk_fastp_args[@]}" \
       -i "$in_se" --out1 "$trim_se" \
       -j "$fp_json" --html "$fp_html"
 
     local se_after
     se_after=$(json_get_int_any "$fp_json" "read1_after_filtering.total_reads" "summary.after_filtering.total_reads")
-    [[ "$se_after" -le 0 ]] && se_after=$(count_reads_fastq_gz "$trim_se")
-    file_nonempty "$trim_se" || die "fastp produced empty trimmed SE for $tag"
+    [[ -e "$trim_se" ]] || die "fastp did not produce trimmed SE output for $tag"
+    if [[ "$se_after" -le 0 && -s "$trim_se" ]]; then
+      se_after=$(count_reads_fastq_gz "$trim_se")
+    fi
+    if [[ "$se_after" -eq 0 ]]; then
+      log "  No SE reads retained after fastp for $tag; skipping empty mapping input"
+      rm -f "$trim_se"
+      [[ -n "$lim_se" ]] && rm -f "$lim_se" 2>/dev/null || true
+      [[ $DELETE_AS_YOU_GO -eq 1 ]] && rm -f "$sec" 2>/dev/null || true
+      continue
+    fi
 
     local se_for_pool="$trim_se" adapt_raw="" adapt_filtered="" adapt_stats=""
     if [[ $RUN_ADAPTCLEAN -eq 1 ]]; then
@@ -1406,7 +1571,15 @@ run_fastp_and_pool() {
         se_after="$kept"
       fi
     fi
-    cat "$se_for_pool" >> "$POOL_SE_ALL"
+    if [[ "$MAX_READS_PER_CHUNK" -gt 0 ]]; then
+      if [[ "$se_after" -gt 0 ]]; then
+        local direct_id="${tag#${SAMPLE}.}"
+        direct_id="${direct_id/.SE_/_}"
+        mv "$se_for_pool" "$MAPCHUNKS/${SAMPLE}.SE_${direct_id}.fastq.gz"
+      fi
+    else
+      cat "$se_for_pool" >> "$POOL_SE_ALL"
+    fi
     TRIMMED_FRAGMENTS=$(py_add "$TRIMMED_FRAGMENTS" "$se_after")
 
     rm -f "$trim_se" "$adapt_raw" "$adapt_filtered" 2>/dev/null || true
@@ -1425,13 +1598,13 @@ run_fastp_and_pool() {
   } > "$RAW_META"
 
   ckpt_mark fastp_pool
-  log "fastp+pool complete. Raw counts written: $RAW_META"
+  log "fastp complete. Raw counts written: $RAW_META"
 }
 
 if ! ckpt_ok fastp_pool "${need_fastp_files[@]}"; then
   run_fastp_and_pool
 else
-  log "STEP: fastp+pool (skipped; checkpoint present)"
+  log "STEP: fastp mapping inputs (skipped; checkpoint present)"
 fi
 
 ###############################################################################
@@ -1462,7 +1635,7 @@ if [[ $TRIM_ONLY -eq 1 ]]; then
 fi
 
 ###############################################################################
-# STEP 3: POST-FASTP MAPPING CHUNKING (OPTIONAL; REUSE MAX_READS_PER_CHUNK)
+# STEP 3: PREPARE MAPPING INPUTS (UNCHUNKED POOL OR DIRECT FASTP CHUNKS)
 ###############################################################################
 make_mapchunks_se() {
   local in="$1" prefix="$2"
@@ -1524,7 +1697,7 @@ persist_mapchunk_ids() {
   ckpt_mark mapchunk
 }
 
-log "STEP: post-fastp mapping chunking"
+log "STEP: prepare mapping inputs"
 
 # BUGFIX: mapchunk checkpoint must accept empty idlists; also only require PE list when PE is expected.
 need_mapchunk_lists=( "$SE_IDLIST" )
@@ -1534,12 +1707,15 @@ fi
 
 if ! ckpt_ok_exists mapchunk "${need_mapchunk_lists[@]}"; then
   ckpt_clear mapchunk
-  rm -f "$MAPCHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
-
-  if [[ "$LIBTYPE" != "ancient-fast" && "$SEQ_MODE" != "SE" ]]; then
-    make_mapchunks_pe "$POOL_PE_R1" "$POOL_PE_R2" "$MAPCHUNKS/${SAMPLE}.PE.R1_" "$MAPCHUNKS/${SAMPLE}.PE.R2_"
+  if [[ "$MAX_READS_PER_CHUNK" -eq 0 ]]; then
+    rm -f "$MAPCHUNKS/${SAMPLE}."*.fastq.gz 2>/dev/null || true
+    if [[ "$LIBTYPE" != "ancient-fast" && "$SEQ_MODE" != "SE" ]]; then
+      make_mapchunks_pe "$POOL_PE_R1" "$POOL_PE_R2" "$MAPCHUNKS/${SAMPLE}.PE.R1_" "$MAPCHUNKS/${SAMPLE}.PE.R2_"
+    fi
+    make_mapchunks_se "$POOL_SE_ALL" "$MAPCHUNKS/${SAMPLE}.SE_"
+  else
+    log "  Reusing fastp unit-chunk outputs directly for mapping"
   fi
-  make_mapchunks_se "$POOL_SE_ALL" "$MAPCHUNKS/${SAMPLE}.SE_"
 
   persist_mapchunk_ids
 else

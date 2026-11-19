@@ -97,6 +97,19 @@ alignment_checksum() {
   samtools view "$1" | LC_ALL=C sort | sha256sum | awk '{print $1}'
 }
 
+compare_mapping_fastqs() {
+  local first="$1" second="$2" sample="$3" name
+  local first_dir="$first/$sample/work/mapchunks"
+  local second_dir="$second/$sample/work/mapchunks"
+  mapfile -t first_names < <(find "$first_dir" -maxdepth 1 -name '*.fastq.gz' -printf '%f\n' | LC_ALL=C sort)
+  mapfile -t second_names < <(find "$second_dir" -maxdepth 1 -name '*.fastq.gz' -printf '%f\n' | LC_ALL=C sort)
+  [[ "${#first_names[@]}" -gt 0 && "${first_names[*]}" == "${second_names[*]}" ]]
+  for name in "${first_names[@]}"; do
+    [[ "$(gzip -cd "$first_dir/$name" | sha256sum)" == \
+       "$(gzip -cd "$second_dir/$name" | sha256sum)" ]]
+  done
+}
+
 validate_outputs() {
   local prefix="$1"
   local mode="$2"
@@ -341,6 +354,11 @@ export FASTP_CALLS="$TMP_ROOT/fastp-call-count"
 cat > "$fastp_wrapper" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+for arg in "$@"; do
+  if [[ "$arg" == --reads_to_process ]]; then
+    exec "$REAL_FASTP" "$@"
+  fi
+done
 calls=0
 [[ ! -f "$FASTP_CALLS" ]] || read -r calls < "$FASTP_CALLS"
 calls=$((calls + 1))
@@ -376,11 +394,7 @@ run_plainmap preprocess_resume modern "$preprocess_base" \
   --max-reads-per-chunk 1 --trim-only --keep-intermediate
 cmp -s "$preprocess_out/preprocess_resume.plainmap.stats.tsv" \
        "$preprocess_base/preprocess_resume.plainmap.stats.tsv"
-for pooled in pool.PE.R1 pool.PE.R2 pool.SE.all; do
-  resumed="$preprocess_out/preprocess_resume/work/raw/preprocess_resume.${pooled}.fastq.gz"
-  baseline="$preprocess_base/preprocess_resume/work/raw/preprocess_resume.${pooled}.fastq.gz"
-  [[ "$(gzip -dc "$resumed" | sha256sum)" == "$(gzip -dc "$baseline" | sha256sum)" ]]
-done
+compare_mapping_fastqs "$preprocess_out" "$preprocess_base" preprocess_resume
 
 if command -v "$ADAPTCLEAN_CMD" >/dev/null 2>&1; then
   echo "Testing optional AdaptClean on true single-end reads"
@@ -473,7 +487,7 @@ if command -v "$ADAPTCLEAN_CMD" >/dev/null 2>&1; then
       cat "$TMP_ROOT/adapter-se-variable.log" >&2
       exit 1
     }
-  variable_lengths=$(gzip -dc "$variable_out/adapter_variable/work/raw/adapter_variable.pool.SE.all.fastq.gz" \
+  variable_lengths=$(gzip -dc "$variable_out/adapter_variable/work/mapchunks/adapter_variable.SE_"*.fastq.gz \
     | awk 'NR%4==2{print length($0)}' | paste -sd, -)
   [[ "$variable_lengths" == '73,73,72,72' ]]
   awk -F '\t' 'NR==2 {if ($3!=76 || $4!="NA" || $5!=2 || $6!=0) exit 1; first=1} NR==3 {if ($3!=76 || $4!="AGATC" || $5!=2 || $6!=2) exit 1; second=1} END {if (!first || !second) exit 1}' \
