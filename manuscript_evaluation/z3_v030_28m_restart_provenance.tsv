@@ -1,0 +1,16 @@
+plainmap_sha256	adbeb8f15c8100938344ac012f68989b62095f406e381050d9dbec649d9dd492
+manifest_sha256	ae46e6dc4893a6c1958e186d5b4ec7ef5ee164ad080115ea024814e594e9f38b
+reference	/home/people/micwe/Biodiversity_Extinction/Japanese_sea_lion/Reference_genomes/GCF_009762305.2_mZalCal1.pri.v2_genomic.fna
+baseline	/net/domus/home/people/micwe/Scripts/PlainMap/manuscript_evaluation/evaluation_runs/large_z3_current/chunked
+mode	modern
+threads	16
+pilot_fragments_per_unit	10000000
+chunk_size	1000000
+dedup_method	hybrid
+fastp_version	fastp 1.0.1
+bwa_version	0.7.17-r1188
+samtools_version	samtools 1.13
+dedup_version	DeDup v0.12.9
+baseline_plainmap_sha256	2723d9eed4ac2d39fe33af11c0cd2f3046362b2963f5632b1d2662daf91fedb6
+slurm_job_id	231879
+slurm_state	COMPLETED (exit 0)

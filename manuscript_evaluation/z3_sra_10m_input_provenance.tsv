@@ -1,0 +1,10 @@
+field	value
+source_accession	SRR25607793
+source_archive	NCBI SRA (fastq-dump direct accession access)
+fastq_dump_version	manuscript_evaluation/evaluation_runs/tools/sratoolkit/sratoolkit.3.4.1-ubuntu64/bin/fastq-dump : 3.4.1
+fastq_dump_options	--split-files --skip-technical --gzip -N 1 -X 10000000
+pairs	10000000
+mate_headers_identical	PASS (all pairs)
+manifest_sha256	c80a82b78bebe1cf55dff94ce84c4f54f20469bc4fbe282b467a16585ed3cfab
+SRR25607793_1.fastq.gz_sha256	f573bc90defd80054a1aa49c40328f9cb4536289e52a2e388f17172dd2e631ab
+SRR25607793_2.fastq.gz_sha256	85ea3fcbbf26335fdcbb67f8f20c9137afb035d41f66f76abb565d0993c0b415

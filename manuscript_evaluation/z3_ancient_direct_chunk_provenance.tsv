@@ -1,0 +1,16 @@
+field	value
+slurm_job_id	262664
+node	node12
+plainmap_sha256	3e47df054ecd8f2767ba13106f3c6178e67e09f892d6ee03e19e527a7ed3c9b4
+manifest_sha256	c80a82b78bebe1cf55dff94ce84c4f54f20469bc4fbe282b467a16585ed3cfab
+reference	/home/people/micwe/Biodiversity_Extinction/Japanese_sea_lion/Reference_genomes/GCF_009762305.2_mZalCal1.pri.v2_genomic.fna
+threads	16
+pilot_fragments_per_unit	10000000
+chunk_sizes	1000000,10000000
+minlength	30
+mapq	20
+dedup_method	hybrid
+fastp_version	fastp 1.0.1
+bwa_version	0.7.17-r1188
+samtools_version	samtools 1.13
+dedup_version	DeDup v0.12.9

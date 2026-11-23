@@ -1,0 +1,13 @@
+field	value
+slurm_job_id	232164
+node	compute02
+plainmap_sha256	adbeb8f15c8100938344ac012f68989b62095f406e381050d9dbec649d9dd492
+manifest_sha256	c80a82b78bebe1cf55dff94ce84c4f54f20469bc4fbe282b467a16585ed3cfab
+sra_accession	SRR25607793
+sra_pair_count	10000000
+reference	/home/people/micwe/Biodiversity_Extinction/Japanese_sea_lion/Reference_genomes/GCF_009762305.2_mZalCal1.pri.v2_genomic.fna
+threads	16
+pilot_fragments_per_unit	10000000
+minlength	30
+mapq	20
+dedup_method	hybrid

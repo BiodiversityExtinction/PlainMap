@@ -1,16 +1,16 @@
 # Manuscript evaluation
 
-This directory records the manifests, commands, parameters, and results for the
-original evaluation and the later scale, chunking, and AdaptClean tests. The
-original [`evaluation_results.tsv`](evaluation_results.tsv) and
-[`restart_checks.tsv`](restart_checks.tsv) are committed, as are the
-[released v0.3.0 mode results](z3_v030_28m_results.tsv) and their
-[input checksums](z3_v030_28m_input_checksums.tsv) and
-[run provenance](z3_v030_28m_provenance.tsv). Full run outputs under
-`evaluation_runs/` are ignored by Git; large FASTQs, reference genomes,
-BAMs, and other newer result tables are not in this repository. The scripts
-and instructions below document how to regenerate them with the required
-input data.
+This directory records manifests, commands, parameters, and results for the
+original evaluation and later scale, chunking, restart, and AdaptClean tests.
+The [combined manuscript table](manuscript_table_v030_sra.md) uses SRA-derived
+Z3 reads and the cave hyena dataset. Its unchunked Z3 mapping modes used the
+immutable `v0.3.0` tag; the newer direct-chunk and restart runs used commit
+`f637f70`. Both scripts print `0.3.0`, but they are different code revisions.
+The input, script, and tool provenance for each result group is linked below.
+Earlier v0.1.0 and ENA-derived evaluations remain archived, but their counts
+should not be mixed with the SRA-derived evaluation. Full run outputs under
+`evaluation_runs/` are ignored by Git; large FASTQs, reference genomes, and
+BAMs are not in this repository.
 
 The original manuscript table used PlainMap v0.1.0 and its samtools-only
 duplicate-removal policy. Check out the immutable `v0.1.0` tag for the exact
@@ -27,19 +27,98 @@ v0.1 mapping and duplicate-removal methodology with v0.3.0, specify
 
 | Evaluation | Data and question | Code and public materials |
 |---|---|---|
+| Current SRA-derived Z3 mapping modes | 27,943,970 input fragments, including 10 million `SRR25607793` SRA pairs with identical mate headers; compare unchunked `modern`, `ancient-fast`, and `ancient-all`. | Tagged `v0.3.0`; [SRA preparation](prepare_z3_10m_sra.sh), [input provenance](z3_sra_10m_input_provenance.tsv), [evaluation runner](run_z3_sra_v030.sh), [results](z3_sra_v030_results.tsv), and [run provenance](z3_sra_v030_provenance.tsv). The same results file also archives the older, superseded chunking series. |
+| Current modern direct chunking and restart | Same SRA-derived Z3 input; compare 1M, 5M, and 10M chunk sizes and resume after three of 46 mapping chunks. | Commit `f637f70`; [runner](run_z3_integrated_chunking.sh), [results](z3_modern_direct_chunk_results.tsv), [provenance](z3_modern_direct_chunk_provenance.tsv), [adapter calls](z3_direct_chunk_adapters.tsv), [restart checks](z3_modern_direct_chunk_restart_checks.tsv), and [resume time](z3_modern_direct_chunk_restart_time.tsv). |
+| Current ancient-mode direct chunking | Same SRA-derived Z3 input; compare 1M and 10M chunks in `ancient-fast` and `ancient-all`. | Commit `f637f70`; [runner](run_z3_ancient_chunking.sh), [results](z3_ancient_direct_chunk_results.tsv), and [provenance](z3_ancient_direct_chunk_provenance.tsv). |
 | Original mapping modes and restart | Three million pilot fragments from a heterogeneous Japanese sea lion (Z3) manifest containing SE and PE FASTQs with SRA- and ENA-style headers; compare `modern`, `ancient-fast`, and `ancient-all`, then interrupt and resume a chunked `modern` run. | v0.1.0; [manifest](Z3_manifest_test.txt), [mapping-mode runner](run_mapping_mode.sh), [restart runner](run_restart_chunk_evaluation.sh), [reported results](evaluation_results.tsv), and [restart checks](restart_checks.tsv). |
-| Larger Z3 workload | 27,943,970 input fragments across the same three manifest units; compare unchunked processing with one-million-fragment chunks under `modern` mapping. | v0.1.0 and, separately, the v0.3.0-equivalent snapshot using hybrid duplicate removal; [input preparation](prepare_z3_10m_inputs.sh) and [benchmark runner](run_large_z3_benchmark.sh). Results from the two duplicate policies are not directly interchangeable. |
-| Released-version mode comparison | The same 27,943,970 Z3 fragments, processed without chunking in `modern`, `ancient-fast`, and `ancient-all` modes. | The exact v0.3.0 release with hybrid duplicate removal; [mode runner](run_z3_28m_modes.sh), [summary collector](summarize_z3_28m_modes.py), [results](z3_v030_28m_results.tsv), [input checksums](z3_v030_28m_input_checksums.tsv), and [run provenance](z3_v030_28m_provenance.tsv). |
+| Archived larger ENA-derived Z3 workload | 27,943,970 input fragments across the same three manifest units, but with ENA-generated `SRR25607793` mates; compare unchunked processing with one-million-fragment chunks under `modern` mapping. | v0.1.0 and, separately, the v0.3.0-equivalent snapshot; [input preparation](prepare_z3_10m_inputs.sh) and [benchmark runner](run_large_z3_benchmark.sh). Do not combine counts from these sources. |
+| Archived ENA-derived released-version comparison | The same ENA-derived 27,943,970 Z3 fragments, processed without chunking in `modern`, `ancient-fast`, and `ancient-all` modes. | Exact v0.3.0; [mode runner](run_z3_28m_modes.sh), [summary collector](summarize_z3_28m_modes.py), [results](z3_v030_28m_results.tsv), [input checksums](z3_v030_28m_input_checksums.tsv), and [run provenance](z3_v030_28m_provenance.tsv). |
+| Archived ENA-derived interrupted restart | Interrupt an ENA-derived 27,943,970-fragment `modern` run after one mapping chunk, then resume and compare with its uninterrupted baseline. | Exact v0.3.0 restart; [runner](run_z3_28m_restart.sh), [checks](z3_v030_28m_restart_checks.tsv), [provenance](z3_v030_28m_restart_provenance.tsv), and [resume resource usage](z3_v030_28m_restart_time.tsv). |
 | Chunking diagnostics | Compare five- and ten-million-fragment chunks with unchunked runs; repeat unchunked runs and inspect stage checksums to locate count differences. A controlled fastp audit compares automatic with fixed adapters. | Snapshot for the larger-run diagnostics; v0.1.0 for the [fastp audit](run_fastp_chunk_audit.sh). See the [chunk-size sweep](run_z3_chunk_size_sweep.sh), [mapping diagnostic](run_z3_mapping_diagnostic.sh), and [repeat runner](run_z3_unchunked_repeat.sh). |
 | Short-read ancient sample | Fifty million pilot fragments from a single-end cave hyena library mapped in `ancient-fast` mode to striped hyena, with AdaptClean off versus on after fastp. | Snapshot; [runner](run_cavehyena_50m_adaptclean.sh) and [summary script](summarize_cavehyena_50m.sh). AdaptClean is not included in the Conda environment. |
 
 These tests check input handling, execution, chunking, and restart behavior.
 Mapped-fragment counts do not establish alignment accuracy or biological
-endogeneity. Chunking can change fastp's automatic adapter inference, so
-small differences in downstream counts are possible; the controlled
-fixed-adapter audit is described under Results below.
+endogeneity. The older per-chunk adapter audit is described under Results;
+the current direct-chunk runs inferred adapters once per input unit and still
+showed some paired-end alignment differences between chunk sizes.
 
-## Dataset
+## Current SRA-derived Z3 evaluation
+
+The primary Z3 analysis uses the first 10,000,000 single-end reads from
+`SRR25607782`, the first 10,000,000 paired SRA spots from `SRR25607793`, and
+all 7,943,970 pairs from `SRR25607804`. The SRA Toolkit v3.4.1 extracted the
+`SRR25607793` mates with `fastq-dump --split-files --skip-technical --gzip -N 1
+-X 10000000`. Both files passed gzip and read-count checks; all 10 million
+corresponding FASTQ headers were identical. PlainMap logged its SRA-header
+fallback and inferred the unit as paired-end in each mapping mode. The source
+and compressed FASTQ hashes are in the [input provenance](z3_sra_10m_input_provenance.tsv).
+
+The tagged `v0.3.0` script processed the same 27,943,970 raw fragments without
+chunking in `modern`, `ancient-fast`, and `ancient-all` modes. Each run used 16
+threads, minimum trimmed length 30 bp, MAPQ 20, and hybrid duplicate removal.
+Unique mapped fragments numbered 70,348, 39,983, and 40,837, respectively;
+ancient-all exceeded ancient-fast by 854. These runs were performed on
+`compute02`. The [SRA evaluation results](z3_sra_v030_results.tsv) also retain
+the original tagged-release chunking and restart tests as historical records;
+those earlier chunked counts are **not** the current manuscript results.
+
+The current direct-chunk analysis used PlainMap commit `f637f70` with the same
+manifest and reference. It probed up to 10,000 raw reads per input unit to
+infer [unit-specific adapters](z3_direct_chunk_adapters.tsv), then mapped
+fastp output chunks directly. All seven chunked conditions retained
+27,928,803 trimmed fragments and 15,036,758 merged reads. Modern-mode unique
+mapped fragments numbered 71,006, 70,341, and 70,328 at 1M, 5M, and 10M
+chunks, respectively. Ancient-fast retained 39,983 at both 1M and 10M;
+the final alignment records were identical between those two runs. Ancient-all
+retained 40,863 and 40,837, respectively; its 26-fragment difference came from
+paired-end alignments and was present before duplicate removal. The
+[modern results](z3_modern_direct_chunk_results.tsv) ran sequentially on
+`compute04`; the [ancient results](z3_ancient_direct_chunk_results.tsv) ran
+sequentially on `node12`. The groups cannot support a controlled cross-node
+timing comparison. Maximum process RSS is not total job memory, and mapped
+counts do not establish alignment accuracy or biological endogeneity.
+
+For the current restart validation, the one-million-fragment modern run was
+interrupted after three of 46 mapping chunks had completed. PlainMap reused
+all three valid BAMs, and the resumed alignment records and complete summary
+statistics matched the uninterrupted run exactly. Its 8.32-minute wall time
+and 4.85-GiB peak process RSS cover only the remaining work after interruption.
+The [checks](z3_modern_direct_chunk_restart_checks.tsv),
+[resume time](z3_modern_direct_chunk_restart_time.tsv), and
+[modern run provenance](z3_modern_direct_chunk_provenance.tsv) record this
+result. All current final Z3 BAMs passed `samtools quickcheck` and contained no
+unmapped or duplicate-flagged records.
+
+To regenerate these analyses, stage the indexed California sea lion reference,
+DeDup v0.12.9, the three Z3 FASTQ units, and SRA Toolkit v3.4.1. See the
+[SRA input preparer](prepare_z3_10m_sra.sh) and its
+[input provenance](z3_sra_10m_input_provenance.tsv). The tagged-release runner
+requires the exact `v0.3.0` script; the two direct-chunk runners require the
+exact `f637f70` script. For example, from the repository root after staging the
+inputs and tools under `manuscript_evaluation/evaluation_runs/`:
+
+```bash
+root="$PWD/manuscript_evaluation/evaluation_runs"
+mkdir -p "$root/z3_v030_28m_modes"
+git show v0.3.0:plainmap.sh > "$root/z3_v030_28m_modes/plainmap_v0.3.0.sh"
+git show f637f70:plainmap.sh > "$root/plainmap_integrated_v030.sh"
+sha256sum "$root/plainmap_integrated_v030.sh" | cut -d ' ' -f 1 \
+  > "$root/plainmap_integrated_v030.sha256"
+chmod +x "$root/plainmap_integrated_v030.sh"
+```
+
+The [tagged-release runner](run_z3_sra_v030.sh),
+[modern direct-chunk runner](run_z3_integrated_chunking.sh), and
+[ancient direct-chunk runner](run_z3_ancient_chunking.sh) record parameters and
+script hashes. Their defaults contain local cluster paths, and the runners
+pin the original absolute-path manifest checksum. Exact reproduction therefore
+requires the original input paths; on another system, adjust those paths and
+the manifest checksum check after verifying the FASTQ hashes in the input
+provenance. Set `REF` to the indexed reference location. Full FASTQs,
+reference sequences, and BAMs are not committed to Git.
+
+## Archived original pilot dataset
 
 The heterogeneous Z3 manifest contains:
 
@@ -58,7 +137,7 @@ preserved.
 Reads were mapped to the California sea lion (*Zalophus californianus*) mZalCal1.pri.v2
 assembly (NCBI RefSeq accession `GCF_009762305.2`).
 
-## Requirements
+## Archived original v0.1.0 requirements
 
 The reported runs used:
 
@@ -298,6 +377,49 @@ The [input checksums](z3_v030_28m_input_checksums.tsv) are SHA-256 hashes of
 the compressed FASTQ files used in these runs. Tool versions, script hash,
 parameters, and Slurm job IDs are in the
 [run provenance](z3_v030_28m_provenance.tsv).
+
+## Released v0.3.0 interrupted restart on larger Z3 input
+
+The [restart runner](run_z3_28m_restart.sh) uses the same 27,943,970-fragment
+manifest and reference, 16 threads, `modern` mode, hybrid duplicate removal,
+`--pilot-fragments 10000000`, and one-million-fragment preprocessing chunks.
+It launches the exact v0.3.0 script, interrupts it after at least one but not
+all mapping-chunk BAMs are valid, then reruns the identical command. The runner
+checks that completed chunks were reused and compares the resumed alignment
+records and statistics with the previously completed, uninterrupted large
+chunked run. The comparator used a frozen script whose executable logic is
+identical to v0.3.0; only comments and the version label differ.
+
+From the repository root, after preparing the inputs and completed chunked
+baseline described above:
+
+```bash
+root="$PWD/manuscript_evaluation/evaluation_runs"
+export PLAINMAP="$root/z3_v030_28m_modes/plainmap_v0.3.0.sh"
+export MANIFEST="$root/z3_10m_inputs/manifest.txt"
+export REF=/path/to/GCF_009762305.2_mZalCal1.pri.v2_genomic.fna
+export DEDUP="$(command -v dedup)"
+export BASELINE_OUT="$root/large_z3_current/chunked"
+export EVAL_ROOT="$root/z3_v030_28m_restart"
+sbatch -c 16 --mem=48G --time=08:00:00 \
+  --job-name=PM_Z3_v030_restart \
+  --output="$root/PM_Z3_v030_restart-%j.out" \
+  --export=ALL \
+  --wrap="bash '$PWD/manuscript_evaluation/run_z3_28m_restart.sh'"
+```
+
+The runner records its checks, script and manifest hashes, tool versions,
+parameters, and resume resource usage in its ignored `EVAL_ROOT` output.
+The completed job (`231879`, exit 0) stopped after one of 29 mapping chunks
+was valid. On resumption, PlainMap reused that chunk and finished successfully.
+The resumed alignment records and complete statistics TSV matched the
+uninterrupted chunked baseline exactly; `samtools quickcheck` passed, and the
+final BAM contained no unmapped or duplicate-flagged records. The resume
+attempt took 399.75 seconds; this is remaining-run time, not a measure of
+restart overhead or a like-for-like runtime comparison with an uninterrupted
+run. The archived [checks](z3_v030_28m_restart_checks.tsv),
+[provenance](z3_v030_28m_restart_provenance.tsv), and
+[timing](z3_v030_28m_restart_time.tsv) record the result.
 
 ## Short-read cave hyena and AdaptClean evaluation
 
